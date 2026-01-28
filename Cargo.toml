@@ -1,0 +1,54 @@
+[package]
+name = "speaker-os"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Embassy async runtime for RP2350 (latest from crates.io)
+embassy-executor = { version = "0.9", features = ["arch-cortex-m", "executor-thread", "defmt"] }
+embassy-time = { version = "0.5", features = ["defmt"] }
+embassy-rp = { version = "0.9", features = ["defmt", "time-driver", "critical-section-impl", "rp235xa", "binary-info"] }
+embassy-sync = { version = "0.7", features = ["defmt"] }
+embassy-futures = "0.1"
+embassy-usb = { version = "0.5", features = ["defmt"] }
+
+# Cortex-M support
+cortex-m = { version = "0.7" }
+cortex-m-rt = "0.7"
+
+# Embedded basics
+embedded-hal = "1.0"
+embedded-hal-async = "1.0"
+embedded-io-async = "0.6"
+
+# Display
+sh1106 = "0.5"
+embedded-graphics = "0.8"
+
+# Logging
+defmt = "1.0"
+defmt-rtt = "0.4"
+panic-probe = { version = "0.3", features = ["print-defmt"] }
+
+# No-std utilities
+heapless = "0.8"
+static_cell = "2"
+portable-atomic = { version = "1", features = ["critical-section"] }
+fixed = "1.28"
+
+# PIO for I2S (updated for embassy-rp 0.9)
+pio = "0.3"
+
+[features]
+default = []
+
+[profile.release]
+debug = 2
+lto = true
+opt-level = "s"
+
+[profile.dev]
+debug = 2
+lto = true
+opt-level = 1

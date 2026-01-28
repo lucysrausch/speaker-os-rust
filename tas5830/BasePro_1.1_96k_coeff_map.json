@@ -1,0 +1,338 @@
+[
+  {
+    "component": "Biquad",
+    "channel": "Left",
+    "band": 0,
+    "start_coeff": 2010,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "Biquad",
+    "channel": "Left",
+    "band": 1,
+    "start_coeff": 2015,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "Biquad",
+    "channel": "Left",
+    "band": 2,
+    "start_coeff": 2020,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "Biquad",
+    "channel": "Left",
+    "band": 3,
+    "start_coeff": 2025,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "Biquad",
+    "channel": "Left",
+    "band": 4,
+    "start_coeff": 2030,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "Biquad",
+    "channel": "Left",
+    "band": 5,
+    "start_coeff": 2035,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "Biquad",
+    "channel": "Left",
+    "band": 6,
+    "start_coeff": 2040,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "Biquad",
+    "channel": "Left",
+    "band": 7,
+    "start_coeff": 2045,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "Biquad",
+    "channel": "Left",
+    "band": 8,
+    "start_coeff": 2050,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "Biquad",
+    "channel": "Left",
+    "band": 9,
+    "start_coeff": 2055,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "Biquad",
+    "channel": "Left",
+    "band": 10,
+    "start_coeff": 2060,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "Biquad",
+    "channel": "Left",
+    "band": 11,
+    "start_coeff": 2065,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "Biquad",
+    "channel": "Left",
+    "band": 0,
+    "start_coeff": 2070,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "Biquad",
+    "channel": "Left",
+    "band": 1,
+    "start_coeff": 2075,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "Biquad",
+    "channel": "Left",
+    "band": 2,
+    "start_coeff": 2080,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "Biquad",
+    "channel": "Left",
+    "band": 3,
+    "start_coeff": 2085,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "Biquad",
+    "channel": "Left",
+    "band": 4,
+    "start_coeff": 2090,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "Biquad",
+    "channel": "Left",
+    "band": 5,
+    "start_coeff": 2095,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "Biquad",
+    "channel": "Left",
+    "band": 6,
+    "start_coeff": 2100,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "Biquad",
+    "channel": "Left",
+    "band": 7,
+    "start_coeff": 2105,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "Biquad",
+    "channel": "Left",
+    "band": 8,
+    "start_coeff": 2110,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "Biquad",
+    "channel": "Left",
+    "band": 9,
+    "start_coeff": 2115,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "Biquad",
+    "channel": "Left",
+    "band": 10,
+    "start_coeff": 2120,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "Biquad",
+    "channel": "Left",
+    "band": 11,
+    "start_coeff": 2125,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "DigitalGain",
+    "channel": "Left",
+    "band": 0,
+    "start_coeff": 173,
+    "num_coeffs": 1,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "DigitalGain",
+    "channel": "Right",
+    "band": 0,
+    "start_coeff": 174,
+    "num_coeffs": 1,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "outputCrossbar:M2AR",
+    "channel": null,
+    "band": 0,
+    "start_coeff": 281,
+    "num_coeffs": 1,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "outputCrossbar:M2I2SR",
+    "channel": null,
+    "band": 0,
+    "start_coeff": 276,
+    "num_coeffs": 1,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "outputCrossbar:M2AL",
+    "channel": null,
+    "band": 0,
+    "start_coeff": 278,
+    "num_coeffs": 1,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "outputCrossbar:M2I2SL",
+    "channel": null,
+    "band": 0,
+    "start_coeff": 272,
+    "num_coeffs": 1,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "outputCrossbar:L2AL",
+    "channel": null,
+    "band": 0,
+    "start_coeff": 279,
+    "num_coeffs": 1,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "outputCrossbar:L2AR",
+    "channel": null,
+    "band": 0,
+    "start_coeff": 282,
+    "num_coeffs": 1,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "outputCrossbar:L2I2SL",
+    "channel": null,
+    "band": 0,
+    "start_coeff": 273,
+    "num_coeffs": 1,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "outputCrossbar:L2I2SR",
+    "channel": null,
+    "band": 0,
+    "start_coeff": 274,
+    "num_coeffs": 1,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "PostEQ",
+    "channel": "Left",
+    "band": 0,
+    "start_coeff": 2389,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "PostEQ",
+    "channel": "Left",
+    "band": 1,
+    "start_coeff": 2394,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "PostEQ",
+    "channel": "Right",
+    "band": 0,
+    "start_coeff": 2389,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "PostEQ",
+    "channel": "Right",
+    "band": 1,
+    "start_coeff": 2394,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "DRC:crossover:Low",
+    "channel": null,
+    "band": 0,
+    "start_coeff": 2347,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "DRC:crossover:Low",
+    "channel": null,
+    "band": 1,
+    "start_coeff": 2352,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "DRC:crossover:High",
+    "channel": null,
+    "band": 0,
+    "start_coeff": 2357,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  },
+  {
+    "component": "DRC:crossover:High",
+    "channel": null,
+    "band": 1,
+    "start_coeff": 2362,
+    "num_coeffs": 5,
+    "process_flow": "BasePro_96k"
+  }
+]
