@@ -32,7 +32,8 @@ use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Timer};
 use static_cell::StaticCell;
 
-use crate::audio::{I2sTx, calculate_clock_divider, AudioRingBuffer, StereoFrame}; //, SpdifReceiver, SpdifSample, RxState};
+use crate::audio::{I2sTx, calculate_clock_divider, AudioRingBuffer, StereoFrame};
+use crate::audio::{SpdifRx, SpdifState, Resampler, SPDIF_RX_FIFO_SIZE, DMA_BLOCK_SIZE as SPDIF_DMA_BLOCK_SIZE};
 use embassy_rp::peripherals::{PIO0, PIO1};
 use embassy_rp::pio::Common;
 
@@ -85,6 +86,12 @@ static mut I2S_TX: Option<I2sTx<'static, PIO1, 0>> = None;
 
 /// Flag to signal Core 1 that I2S is ready
 static I2S_READY: AtomicBool = AtomicBool::new(false);
+
+/// Flag indicating S/PDIF is active (has priority over USB)
+static SPDIF_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// S/PDIF FIFO buffer (static allocation)
+static SPDIF_FIFO: StaticCell<[u32; SPDIF_RX_FIFO_SIZE]> = StaticCell::new();
 
 /// State update messages
 #[derive(Debug, Clone)]
@@ -197,16 +204,19 @@ async fn main(spawner: Spawner) {
     // Signal Core 1 that I2S is ready
     I2S_READY.store(true, Ordering::Release);
 
-    // Initialize S/PDIF input using PIO0 (TODO)
-    /*defmt::info!("Initializing S/PDIF input...");
+    // Initialize S/PDIF input using PIO0
+    defmt::info!("Initializing S/PDIF input...");
     boot_screen.set_progress(50, "Init SPDIF...");
     let _ = boot_screen.draw(&mut display, &app_state);
     let _ = display.flush();
 
     let pio0 = Pio::new(p.PIO0, Irqs);
 
+    // Initialize S/PDIF FIFO buffer
+    let spdif_fifo = SPDIF_FIFO.init([0u32; SPDIF_RX_FIFO_SIZE]);
+
     // Spawn S/PDIF receiver task with full PIO access for rate switching
-    spawner.spawn(spdif_rx_task(pio0, p.PIN_3)).unwrap();*/
+    spawner.spawn(spdif_task(pio0, p.PIN_3, p.DMA_CH0, spdif_fifo)).unwrap();
 
     boot_screen.set_progress(60, "Audio ready");
     let _ = boot_screen.draw(&mut display, &app_state);
@@ -330,6 +340,186 @@ async fn encoder_task(mut encoder: RotaryEncoder<'static>) {
     }
 }
 
+/// S/PDIF receiver task
+///
+/// Monitors S/PDIF input for signal, detects sample rate, and streams audio
+/// to the shared ring buffer. When S/PDIF is active, it takes priority over USB.
+///
+/// Critical timing: The PIO hardware FIFO is only 8 words deep (~83µs at 96kHz).
+/// We use the same pattern as standalone spdif_to_i2s: run DMA while processing
+/// the previous batch of data concurrently.
+#[embassy_executor::task]
+async fn spdif_task(
+    mut pio0: embassy_rp::pio::Pio<'static, PIO0>,
+    spdif_pin: embassy_rp::Peri<'static, embassy_rp::peripherals::PIN_3>,
+    dma_ch: embassy_rp::Peri<'static, embassy_rp::peripherals::DMA_CH0>,
+    fifo_buff: &'static mut [u32; SPDIF_RX_FIFO_SIZE],
+) {
+    use embassy_futures::join::join;
+
+    defmt::info!("S/PDIF task started");
+
+    // Create S/PDIF receiver (PIO0, SM0)
+    let mut spdif = SpdifRx::new(
+        &mut pio0.common,
+        pio0.sm0,
+        dma_ch,
+        spdif_pin,
+        fifo_buff,
+        0, // PIO0
+    );
+
+    // Create resampler (output always 96kHz)
+    let mut resampler = Resampler::new(96_000);
+
+    // Buffers for audio processing - keep small for low latency
+    const RAW_BUF_SIZE: usize = 64; // Match DMA block size
+    const STEREO_BUF_SIZE: usize = RAW_BUF_SIZE / 2; // 32 stereo frames
+    const OUTPUT_BUF_SIZE: usize = 128; // Room for 2.17x upsampling
+    let mut raw_buffer = [0u32; RAW_BUF_SIZE];
+    let mut stereo_buffer = [StereoFrame::ZERO; STEREO_BUF_SIZE];
+    let mut output_buffer = [StereoFrame::ZERO; OUTPUT_BUF_SIZE];
+
+    // Double buffer for previous batch processing while DMA runs
+    let mut prev_raw_buffer = [0u32; RAW_BUF_SIZE];
+    let mut prev_count: usize = 0;
+
+    // Track state to avoid flooding STATE_CHANNEL
+    let mut notified_stable = false;
+    let mut mute = true;
+
+    loop {
+        match spdif.state() {
+            SpdifState::NoSignal => {
+                // S/PDIF not active - allow USB to play
+                SPDIF_ACTIVE.store(false, Ordering::Release);
+                notified_stable = false;
+                mute = true;
+                prev_count = 0;
+
+                // Try to detect signal
+                if spdif.detect_signal(&mut pio0.common).await {
+                    let sample_freq = spdif.sample_freq();
+                    let rate_hz = sample_freq.as_hz();
+                    defmt::info!("S/PDIF detected: {} Hz", rate_hz);
+
+                    // Update resampler for new input rate
+                    resampler.set_input_rate(rate_hz);
+
+                    // Notify main of sample rate
+                    let _ = STATE_CHANNEL.try_send(AppStateUpdate::SampleRateChanged(rate_hz));
+
+                    // Start decoding
+                    spdif.start_decode(&mut pio0.common);
+                } else {
+                    // No signal - wait before trying again
+                    Timer::after(Duration::from_millis(100)).await;
+                }
+            }
+
+            SpdifState::WaitingStable => {
+                // Signal detected but not yet stable - keep processing DMA
+                // IMPORTANT: Must also drain the software FIFO to prevent overflow!
+                // We just don't write to the audio output ring buffer yet.
+
+                // Drain software FIFO (discard samples during stabilization)
+                while spdif.fifo_count() >= RAW_BUF_SIZE {
+                    let _ = spdif.read_fifo(&mut raw_buffer);
+                }
+
+                // Continue filling from PIO via DMA
+                let _ = spdif.process_dma(SPDIF_DMA_BLOCK_SIZE).await;
+
+                // Check if signal was lost during stabilization
+                if spdif.state() == SpdifState::NoSignal {
+                    defmt::warn!("S/PDIF signal lost during stabilization");
+                    spdif.reset();
+                    let _ = STATE_CHANNEL.try_send(AppStateUpdate::SignalDetected(false));
+                }
+            }
+
+            SpdifState::Stable => {
+                // S/PDIF is stable - take priority over USB
+                SPDIF_ACTIVE.store(true, Ordering::Release);
+
+                // Notify main ONCE when we become stable
+                if !notified_stable {
+                    notified_stable = true;
+                    let _ = STATE_CHANNEL.try_send(AppStateUpdate::SourceChanged(AudioSource::Spdif));
+                    let _ = STATE_CHANNEL.try_send(AppStateUpdate::SignalDetected(true));
+                }
+
+                // Unmute when software FIFO is reasonably full (like standalone code)
+                let fifo_count = spdif.fifo_count();
+                if mute && fifo_count >= SPDIF_RX_FIFO_SIZE / 2 {
+                    mute = false;
+                    defmt::info!("S/PDIF unmuted, FIFO: {}", fifo_count);
+                }
+
+                // Read from software FIFO into current buffer
+                let count = if !mute && fifo_count >= RAW_BUF_SIZE {
+                    spdif.read_fifo(&mut raw_buffer)
+                } else {
+                    0
+                };
+
+                // Process PREVIOUS batch while DMA runs for CURRENT batch
+                // This is the key pattern from standalone spdif_to_i2s
+                let process_fut = async {
+                    if prev_count >= 2 {
+                        // Extract stereo frames from S/PDIF words
+                        let num_frames = prev_count / 2;
+                        for i in 0..num_frames {
+                            let left_word = prev_raw_buffer[i * 2];
+                            let right_word = prev_raw_buffer[i * 2 + 1];
+                            stereo_buffer[i] = StereoFrame::new(
+                                crate::audio::extract_audio(left_word),
+                                crate::audio::extract_audio(right_word),
+                            );
+                        }
+
+                        // Resample to 96kHz
+                        let output_count = resampler.process(
+                            &stereo_buffer[..num_frames],
+                            &mut output_buffer,
+                        );
+
+                        // Write to shared ring buffer
+                        // SAFETY: We hold SPDIF_ACTIVE, USB task will not write
+                        let input = unsafe { &mut AUDIO_INPUT };
+                        for i in 0..output_count {
+                            input.write_sample(output_buffer[i]);
+                        }
+                    }
+                };
+
+                // Run DMA and processing CONCURRENTLY - this is critical!
+                // While DMA drains the PIO FIFO, we process the previous batch
+                join(
+                    spdif.process_dma(SPDIF_DMA_BLOCK_SIZE),
+                    process_fut
+                ).await;
+
+                // Save current buffer for next iteration's processing
+                prev_raw_buffer[..count].copy_from_slice(&raw_buffer[..count]);
+                prev_count = count;
+
+                // Check if signal was lost
+                if spdif.state() == SpdifState::NoSignal {
+                    defmt::warn!("S/PDIF signal lost");
+                    SPDIF_ACTIVE.store(false, Ordering::Release);
+                    notified_stable = false;
+                    mute = true;
+                    prev_count = 0;
+                    spdif.reset();
+                    let _ = STATE_CHANNEL.try_send(AppStateUpdate::SignalDetected(false));
+                    let _ = STATE_CHANNEL.try_send(AppStateUpdate::SourceChanged(AudioSource::Usb));
+                }
+            }
+        }
+    }
+}
+
 /// USB audio task
 #[embassy_executor::task]
 async fn usb_task(usb: embassy_rp::Peri<'static, USB>) {
@@ -409,7 +599,20 @@ async fn usb_task(usb: embassy_rp::Peri<'static, USB>) {
             match stream.read_packet(&mut buf).await {
                 Ok(n) => {
                     if n > 0 {
-                        // Audio data received - switch to USB source
+                        // Check if S/PDIF is active (has priority)
+                        let spdif_active = SPDIF_ACTIVE.load(Ordering::Acquire);
+
+                        if spdif_active {
+                            // S/PDIF is playing - drop USB audio silently
+                            // Keep reading to prevent USB buffer overflow
+                            if usb_active {
+                                usb_active = false;
+                                defmt::info!("USB audio paused (S/PDIF active)");
+                            }
+                            continue;
+                        }
+
+                        // S/PDIF not active - USB can play
                         if !usb_active {
                             usb_active = true;
                             let _ = STATE_CHANNEL.try_send(AppStateUpdate::SourceChanged(
@@ -424,7 +627,7 @@ async fn usb_task(usb: embassy_rp::Peri<'static, USB>) {
                         // Buffer format: 32-bit signed, MSB-aligned
                         let samples = n / 6; // 6 bytes per stereo sample (3 bytes * 2 channels)
 
-                        // SAFETY: Single writer (USB task), reads are from DSP task
+                        // SAFETY: Single writer (USB task when S/PDIF inactive)
                         let input = unsafe { &mut AUDIO_INPUT };
 
                         for i in 0..samples {
@@ -449,8 +652,8 @@ async fn usb_task(usb: embassy_rp::Peri<'static, USB>) {
                                 right_24
                             };
 
-                            // Shift left by 8 to MSB-align for 32-bit I2S
-                            let frame = StereoFrame::new(left << 8, right << 8);
+                            // Shift left by 7 (8 to MSB-align, then >> 1 to attenuate and prevent clipping)
+                            let frame = StereoFrame::new(left << 7, right << 7);
                             input.write_sample(frame);
                         }
                     }

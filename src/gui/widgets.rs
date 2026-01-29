@@ -222,7 +222,11 @@ impl StatusBar {
 
         // Draw sample rate in center
         let mut rate_str: String<12> = String::new();
-        let _ = write!(rate_str, "{}kHz", self.sample_rate / 1000);
+        if self.sample_rate == 44100 {
+            let _ = write!(rate_str, "44.1kHz");
+        } else {
+            let _ = write!(rate_str, "{}kHz", self.sample_rate / 1000);
+        }
         Text::with_alignment(
             &rate_str,
             Point::new(64, 10),
