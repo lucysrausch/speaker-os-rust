@@ -1,6 +1,6 @@
 # OtterAmp_DSP Pinout Reference
 
-RP2350A GPIO mapping for the OtterAmp_DSP smart speaker platform.
+RP2350A GPIO mapping for the OtterAmp DSP smart speaker platform.
 
 ## GPIO Pin Assignments
 
@@ -57,7 +57,7 @@ RP2350A GPIO mapping for the OtterAmp_DSP smart speaker platform.
 - Pull-ups: 5.1kΩ to +3V3 (R43, R47)
 - Interrupt line on GPIO15 for fault/status reporting
 
-### I2S Audio (PIO, RP2350 Master)
+### I2S Audio (PIO, RP2350 controller)
 - **AMP0 (TAS5830)**: I2S output to Class-D amplifier (GPIOs 19-22)
   - Configured via I2C1
   - Supports return channel for diagnostics
@@ -71,27 +71,6 @@ RP2350A GPIO mapping for the OtterAmp_DSP smart speaker platform.
 - Output: J7B with 120Ω termination
 - Signal conditioning: dual 74LVC1GU04 inverters
 - Mux: 74LVC1G157 for RX/TX loopback selection
-
-## External Connector (J1 - C2911)
-
-| Pin | Signal      | Description                    |
-|-----|-------------|--------------------------------|
-| 1   | GNDD        | Digital ground                 |
-| 2   | +5V         | 5V power input                 |
-| 3   | GNDD        | Digital ground                 |
-| 4   | GPIO        | External GPIO                  |
-| 5   | AMP0.FLT    | Amplifier fault                |
-| 6   | AMP0.PDN    | Amplifier power down           |
-| 7   | AMP0.MUTE   | Amplifier mute                 |
-| 8   | I2C1.INT    | TAS5830 interrupt/fault      |
-| 9   | I2C1.SDA    | TAS5830 I2C data             |
-| 10  | I2C1.SCL    | TAS5830 I2C clock            |
-| 11  | GNDD        | Digital ground                 |
-| 12  | AMP0.BCLK   | I2S bit clock                  |
-| 13  | AMP0.WCLK   | I2S word clock                 |
-| 14  | AMP0.DATA   | I2S data out                   |
-| 15  | AMP0.RTN    | I2S return                     |
-| 16  | MP          | Mounting/ground                |
 
 ## Rust HAL Pin Configuration
 
@@ -134,13 +113,13 @@ pub struct OtterAmpPins {
     pub amp_pdn: gpio::Pin<gpio::bank0::Gpio17, gpio::FunctionSioOutput>,
     pub amp_mute: gpio::Pin<gpio::bank0::Gpio18, gpio::FunctionSioOutput>,
     
-    // I2S output to TAS5830 (PIO, master mode)
+    // I2S output to TAS5830 (PIO, controller mode)
     pub amp_bclk: gpio::Pin<gpio::bank0::Gpio19, gpio::FunctionPio1>,
     pub amp_wclk: gpio::Pin<gpio::bank0::Gpio20, gpio::FunctionPio1>,
     pub amp_data: gpio::Pin<gpio::bank0::Gpio21, gpio::FunctionPio1>,
     pub amp_rtn: gpio::Pin<gpio::bank0::Gpio22, gpio::FunctionPio1>,
     
-    // I2S input from PCM1822 (PIO, master mode, 32-bit stereo)
+    // I2S input from PCM1822 (PIO, controller mode, 32-bit stereo)
     pub adc_bclk: gpio::Pin<gpio::bank0::Gpio23, gpio::FunctionPio1>,
     pub adc_wclk: gpio::Pin<gpio::bank0::Gpio24, gpio::FunctionPio1>,
     pub adc_data: gpio::Pin<gpio::bank0::Gpio25, gpio::FunctionPio1>,
@@ -149,7 +128,7 @@ pub struct OtterAmpPins {
 
 ## Notes
 
-- RP2350 is I2S master for both TAS5830 and PCM1822
+- RP2350 is I2S controller for both TAS5830 and PCM1822
 - PCM1822 ADC is hardwired (no I2C): 32-bit word length, 2-channel, I2S format
 - All GPIO active at 3.3V logic levels
 - Series resistors (27Ω) on high-speed signals for EMI/ringing suppression
@@ -175,7 +154,7 @@ The RP2350 has fixed I2C pin function assignments that differ from the original 
 **Rev 1.0 Bodge Instructions:**
 1. **I2C0**: Cut traces to GPIO0/GPIO1 at OLED connector, cross-wire (GPIO0→SDA pad, GPIO1→SCL pad)
 2. **I2C1**: Add wire bridge from GPIO13 pad to GPIO15 pad (GPIO15/INT function sacrificed)
-3. **UART** (optional): Cut traces to GPIO6/GPIO7, cross-wire for correct TX/RX
+3. **UART** (optional): It's fucked.
 
 ### Rev 1.1 Planned Fixes
 

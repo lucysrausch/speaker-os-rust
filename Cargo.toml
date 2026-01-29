@@ -37,7 +37,7 @@ static_cell = "2"
 portable-atomic = { version = "1", features = ["critical-section"] }
 fixed = "1.28"
 
-# PIO for I2S (updated for embassy-rp 0.9)
+# PIO for I2S and S/PDIF (updated for embassy-rp 0.9)
 pio = "0.3"
 
 [features]
