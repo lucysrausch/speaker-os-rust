@@ -1,6 +1,6 @@
 //! I2S driver using PIO
 //!
-//! Implements I2S master mode for both input (PCM1822 ADC) and output (TAS5830 amp).
+//! Implements I2S controller mode for both input (PCM1822 ADC) and output (TAS5830 amp).
 //! Uses RP2350 PIO state machines for generating/receiving I2S signals.
 //!
 //! ## Architecture

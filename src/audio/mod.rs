@@ -12,11 +12,11 @@
 
 pub mod i2s;
 pub mod pipeline;
-pub mod spdif;
+//pub mod spdif;
 
 pub use i2s::{I2sTx, I2sRx, StereoSample, calculate_clock_divider};
 pub use pipeline::{
     AudioRingBuffer, AudioSource, OutputBuffer, StereoFrame,
     BLOCK_SIZE, BUFFER_SIZE, DSP_BLOCK_READY, DMA_COMPLETE,
 };
-pub use spdif::{SpdifRx, SpdifDetector, SpdifSample, SampleRate, RxState};
+//pub use spdif::{SpdifReceiver, SpdifSample, SampleRate, RxState};

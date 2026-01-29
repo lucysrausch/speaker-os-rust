@@ -32,8 +32,9 @@ use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Timer};
 use static_cell::StaticCell;
 
-use crate::audio::{I2sTx, calculate_clock_divider, AudioRingBuffer, StereoFrame};
-use embassy_rp::peripherals::PIO1;
+use crate::audio::{I2sTx, calculate_clock_divider, AudioRingBuffer, StereoFrame}; //, SpdifReceiver, SpdifSample, RxState};
+use embassy_rp::peripherals::{PIO0, PIO1};
+use embassy_rp::pio::Common;
 
 use cortex_m::asm;
 use defmt_rtt as _;
@@ -43,6 +44,7 @@ use panic_probe as _;
 bind_interrupts!(struct Irqs {
     I2C0_IRQ => embassy_rp::i2c::InterruptHandler<embassy_rp::peripherals::I2C0>;
     I2C1_IRQ => embassy_rp::i2c::InterruptHandler<embassy_rp::peripherals::I2C1>;
+    PIO0_IRQ_0 => embassy_rp::pio::InterruptHandler<embassy_rp::peripherals::PIO0>;
     PIO1_IRQ_0 => embassy_rp::pio::InterruptHandler<embassy_rp::peripherals::PIO1>;
     USBCTRL_IRQ => embassy_rp::usb::InterruptHandler<embassy_rp::peripherals::USB>;
 });
@@ -64,7 +66,7 @@ pub static IMAGE_DEF: ImageDef = ImageDef::secure_exe();
 #[used]
 pub static PICOTOOL_ENTRIES: [embassy_rp::binary_info::EntryAddr; 4] = [
     embassy_rp::binary_info::rp_program_name!(c"OtterDSP Speaker"),
-    embassy_rp::binary_info::rp_program_description!(c"96kHz/24-bit USB audio speaker firmware for RP2350"),
+    embassy_rp::binary_info::rp_program_description!(c"Studio speaker firmware using RP2350"),
     embassy_rp::binary_info::rp_cargo_version!(),
     embassy_rp::binary_info::rp_program_build_attribute!(),
 ];
@@ -101,7 +103,6 @@ async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
 
     // Status LED (GPIO12 on custom board - LED0)
-    // Note: On Pico 2, GPIO25 is LED but conflicts with ADC_DATA
     let mut led = Output::new(p.PIN_12, Level::Low);
     led.set_high();
 
@@ -129,7 +130,7 @@ async fn main(spawner: Spawner) {
 
     // Initialize SH1106 OLED (1.3" display) with address from pins.rs
     let mut display: GraphicsMode<_> = Builder::new()
-        .with_i2c_addr(i2c_addr::SSD1306)
+        .with_i2c_addr(i2c_addr::SH1106)
         .with_size(DisplaySize::Display128x64)
         .with_rotation(DisplayRotation::Rotate0)
         .connect_i2c(i2c0)
@@ -195,6 +196,17 @@ async fn main(spawner: Spawner) {
 
     // Signal Core 1 that I2S is ready
     I2S_READY.store(true, Ordering::Release);
+
+    // Initialize S/PDIF input using PIO0 (TODO)
+    /*defmt::info!("Initializing S/PDIF input...");
+    boot_screen.set_progress(50, "Init SPDIF...");
+    let _ = boot_screen.draw(&mut display, &app_state);
+    let _ = display.flush();
+
+    let pio0 = Pio::new(p.PIO0, Irqs);
+
+    // Spawn S/PDIF receiver task with full PIO access for rate switching
+    spawner.spawn(spdif_rx_task(pio0, p.PIN_3)).unwrap();*/
 
     boot_screen.set_progress(60, "Audio ready");
     let _ = boot_screen.draw(&mut display, &app_state);

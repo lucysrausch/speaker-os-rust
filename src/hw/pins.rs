@@ -9,7 +9,7 @@
 //!
 //! - **I2C0**: GPIO0↔GPIO1 swapped (schematic had SCL/SDA backwards)
 //! - **I2C1**: GPIO13→GPIO15 bridged (GPIO13 only supports I2C0, not I2C1)
-//! - **UART**: GPIO6↔GPIO7 swapped (optional, for debug UART)
+//! - **UART**: TX→GPIO4, RX→GPIO5 (optional, for debug UART)
 //!
 //! Rev 1.1 will fix these in hardware.
 
@@ -20,8 +20,8 @@ use embassy_rp::peripherals::*;
 pub mod gpio {
     // I2C0 - OLED displays
     // BODGE Rev1.0: Swap GPIO0↔GPIO1 traces at OLED connector
-    pub const I2C0_SDA: u8 = 0;  // Schematic shows SCL, but RP2350 requires SDA here
-    pub const I2C0_SCL: u8 = 1;  // Schematic shows SDA, but RP2350 requires SCL here
+    pub const I2C0_SDA: u8 = 0;
+    pub const I2C0_SCL: u8 = 1;
 
     // S/PDIF
     pub const SPDIF_TX: u8 = 2;
@@ -32,7 +32,6 @@ pub mod gpio {
     pub const EXT_GPIO: u8 = 5;
 
     // Debug UART
-    // BODGE Rev1.0: Swap GPIO6↔GPIO7 traces (optional)
     pub const UART_TX: u8 = 6;
     pub const UART_RX: u8 = 7;
 
@@ -116,8 +115,8 @@ pub mod peripherals {
 
 /// I2C addresses
 pub mod i2c_addr {
-    /// SSD1306 OLED display (typically 0x3C or 0x3D)
-    pub const SSD1306: u8 = 0x3C;
+    /// SH1106 OLED display (typically 0x3C or 0x3D)
+    pub const SH1106: u8 = 0x3C;
 
     /// TAS5830 amplifier default address
     pub const TAS5830: u8 = 0x60;
@@ -159,7 +158,7 @@ pub mod pio {
 
     /// PIO1 is used for I2S
     pub const I2S_PIO: u8 = 1;
-    pub const I2S_MASTER_SM: u8 = 0;  // Clock generation
+    pub const I2S_CONTROLLER_SM: u8 = 0;  // Clock generation
     pub const I2S_ADC_SM: u8 = 1;     // ADC input
     pub const I2S_AMP_SM: u8 = 2;     // Amplifier output
 }

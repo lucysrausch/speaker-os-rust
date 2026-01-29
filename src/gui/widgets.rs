@@ -37,8 +37,8 @@ impl AudioSource {
 
     pub fn short_name(&self) -> &'static str {
         match self {
-            AudioSource::LineIn => "LIN",
-            AudioSource::Spdif => "SPD",
+            AudioSource::LineIn => "LINE",
+            AudioSource::Spdif => "S/PDIF",
             AudioSource::Usb => "USB",
             AudioSource::None => "---",
         }
@@ -234,7 +234,7 @@ impl StatusBar {
         // Draw signal indicator on right
         if self.signal_present {
             Text::with_alignment(
-                "SIG",
+                "SIG OK",
                 Point::new(126, 10),
                 text_style(),
                 Alignment::Right,
