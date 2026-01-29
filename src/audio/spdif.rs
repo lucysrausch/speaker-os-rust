@@ -499,7 +499,7 @@ impl<'d, PIO: Instance, const SM: usize, DMA: Channel> SpdifRx<'d, PIO, SM, DMA>
         trace!("detect_signal: starting DMA capture");
         let mut capture_buf = [0u32; CAPTURE_SIZE];
         let capture_result = embassy_time::with_timeout(
-            Duration::from_millis(100),
+            Duration::from_millis(500),
             self.sm.rx().dma_pull(self.dma.reborrow(), &mut capture_buf, false),
         )
         .await;

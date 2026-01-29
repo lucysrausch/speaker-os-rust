@@ -93,6 +93,12 @@ static SPDIF_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// S/PDIF FIFO buffer (static allocation)
 static SPDIF_FIFO: StaticCell<[u32; SPDIF_RX_FIFO_SIZE]> = StaticCell::new();
 
+/// I2S output sample rate (fixed at 96kHz)
+const I2S_SAMPLE_RATE: u32 = 96_000;
+
+/// USB audio input sample rate (resampled to I2S rate if different)
+const USB_SAMPLE_RATE: u32 = 96_000;
+
 /// State update messages
 #[derive(Debug, Clone)]
 pub enum AppStateUpdate {
@@ -175,7 +181,7 @@ async fn main(spawner: Spawner) {
     let _ = display.flush();
 
     let mut pio1 = Pio::new(p.PIO1, Irqs);
-    let clock_div = calculate_clock_divider(96_000); // 96kHz sample rate
+    let clock_div = calculate_clock_divider(I2S_SAMPLE_RATE);
 
     let i2s_tx = I2sTx::new(
         &mut pio1.common,
@@ -369,8 +375,8 @@ async fn spdif_task(
         0, // PIO0
     );
 
-    // Create resampler (output always 96kHz)
-    let mut resampler = Resampler::new(96_000);
+    // Create resampler (output always matches I2S rate)
+    let mut resampler = Resampler::new(I2S_SAMPLE_RATE);
 
     // Buffers for audio processing - keep small for low latency
     const RAW_BUF_SIZE: usize = 64; // Match DMA block size
@@ -514,6 +520,7 @@ async fn spdif_task(
                     spdif.reset();
                     let _ = STATE_CHANNEL.try_send(AppStateUpdate::SignalDetected(false));
                     let _ = STATE_CHANNEL.try_send(AppStateUpdate::SourceChanged(AudioSource::Usb));
+                    let _ = STATE_CHANNEL.try_send(AppStateUpdate::SampleRateChanged(USB_SAMPLE_RATE));
                 }
             }
         }
@@ -570,7 +577,7 @@ async fn usb_task(usb: embassy_rp::Peri<'static, USB>) {
     let state = UAC_STATE.init(State::new());
 
     // Static arrays for sample rates and channels
-    static SAMPLE_RATES: [u32; 1] = [96_000];
+    static SAMPLE_RATES: [u32; 1] = [USB_SAMPLE_RATE];
     static CHANNELS: [Channel; 2] = [Channel::LeftFront, Channel::RightFront];
 
     let (mut stream, _feedback, control) = Speaker::new(
@@ -619,6 +626,7 @@ async fn usb_task(usb: embassy_rp::Peri<'static, USB>) {
                                 crate::gui::widgets::AudioSource::Usb,
                             ));
                             let _ = STATE_CHANNEL.try_send(AppStateUpdate::SignalDetected(true));
+                            let _ = STATE_CHANNEL.try_send(AppStateUpdate::SampleRateChanged(USB_SAMPLE_RATE));
                             defmt::info!("USB audio stream started");
                         }
 
