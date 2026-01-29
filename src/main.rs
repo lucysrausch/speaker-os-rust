@@ -17,20 +17,25 @@ mod gui;
 mod hw;
 mod usb;
 
+use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_executor::Spawner;
 use embassy_rp::block::ImageDef;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::i2c::{self, I2c};
-use embassy_rp::peripherals::{PIO1, USB};
+use embassy_rp::multicore::{spawn_core1, Stack};
+use embassy_rp::peripherals::USB;
 use embassy_rp::pio::Pio;
 use embassy_rp::usb::Driver as UsbDriver;
 use embassy_rp::bind_interrupts;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Timer};
+use static_cell::StaticCell;
 
-use crate::audio::{I2sTx, calculate_clock_divider};
+use crate::audio::{I2sTx, calculate_clock_divider, AudioRingBuffer, StereoFrame};
+use embassy_rp::peripherals::PIO1;
 
+use cortex_m::asm;
 use defmt_rtt as _;
 use panic_probe as _;
 
@@ -67,9 +72,17 @@ pub static PICOTOOL_ENTRIES: [embassy_rp::binary_info::EntryAddr; 4] = [
 /// Shared application state channel for cross-task communication
 static STATE_CHANNEL: Channel<CriticalSectionRawMutex, AppStateUpdate, 4> = Channel::new();
 
-/// Audio sample channel (USB -> I2S)
-/// Each message is a stereo sample pair (left, right) as 32-bit signed integers
-static AUDIO_CHANNEL: Channel<CriticalSectionRawMutex, (i32, i32), 32> = Channel::new();
+/// Audio ring buffer (USB writes, I2S reads)
+static mut AUDIO_INPUT: AudioRingBuffer = AudioRingBuffer::new();
+
+/// Core 1 stack (4KB should be plenty for tight audio loop)
+static mut CORE1_STACK: Stack<4096> = Stack::new();
+
+/// I2S transmitter - initialized by Core 0, consumed by Core 1
+static mut I2S_TX: Option<I2sTx<'static, PIO1, 0>> = None;
+
+/// Flag to signal Core 1 that I2S is ready
+static I2S_READY: AtomicBool = AtomicBool::new(false);
 
 /// State update messages
 #[derive(Debug, Clone)]
@@ -165,8 +178,23 @@ async fn main(spawner: Spawner) {
         clock_div,
     );
 
-    // Spawn I2S output task
-    spawner.spawn(i2s_output_task(i2s_tx)).unwrap();
+    // Store I2S in static for Core 1 to consume
+    // SAFETY: Core 1 hasn't started yet, no race condition
+    unsafe {
+        I2S_TX = Some(i2s_tx);
+    }
+
+    // Spawn Core 1 for dedicated audio processing
+    // Core 1 runs a tight loop feeding the I2S FIFO - no executor needed
+    defmt::info!("Spawning Core 1 for audio...");
+    spawn_core1(
+        p.CORE1,
+        unsafe { &mut *core::ptr::addr_of_mut!(CORE1_STACK) },
+        core1_audio_main,
+    );
+
+    // Signal Core 1 that I2S is ready
+    I2S_READY.store(true, Ordering::Release);
 
     boot_screen.set_progress(60, "Audio ready");
     let _ = boot_screen.draw(&mut display, &app_state);
@@ -379,10 +407,14 @@ async fn usb_task(usb: embassy_rp::Peri<'static, USB>) {
                             defmt::info!("USB audio stream started");
                         }
 
-                        // Convert USB audio (24-bit packed stereo) to I2S (32-bit stereo)
+                        // Convert USB audio (24-bit packed stereo) to ring buffer
                         // USB format: 3 bytes per sample, little-endian, alternating L/R
-                        // I2S format: 32-bit signed, MSB-aligned
+                        // Buffer format: 32-bit signed, MSB-aligned
                         let samples = n / 6; // 6 bytes per stereo sample (3 bytes * 2 channels)
+
+                        // SAFETY: Single writer (USB task), reads are from DSP task
+                        let input = unsafe { &mut AUDIO_INPUT };
+
                         for i in 0..samples {
                             let base = i * 6;
                             // Extract 24-bit samples (little-endian) and sign-extend to 32-bit
@@ -406,7 +438,8 @@ async fn usb_task(usb: embassy_rp::Peri<'static, USB>) {
                             };
 
                             // Shift left by 8 to MSB-align for 32-bit I2S
-                            let _ = AUDIO_CHANNEL.try_send((left << 8, right << 8));
+                            let frame = StereoFrame::new(left << 8, right << 8);
+                            input.write_sample(frame);
                         }
                     }
                 }
@@ -468,19 +501,39 @@ async fn usb_task(usb: embassy_rp::Peri<'static, USB>) {
     embassy_futures::join::join3(usb_fut, audio_fut, volume_fut).await;
 }
 
-/// I2S output task - receives audio samples and sends to I2S TX
-#[embassy_executor::task]
-async fn i2s_output_task(mut i2s_tx: I2sTx<'static, PIO1, 0>) {
-    defmt::info!("I2S output task started");
+/// Core 1 entry point - dedicated audio processing
+///
+/// Runs a tight loop that feeds the I2S FIFO from the ring buffer.
+/// No executor overhead - just reads samples and writes to PIO.
+/// The PIO FIFO naturally paces output to 96kHz.
+fn core1_audio_main() -> ! {
+    // Wait for Core 0 to signal that I2S is ready
+    while !I2S_READY.load(Ordering::Acquire) {
+        asm::nop();
+    }
+
+    // Take ownership of I2S from the static
+    // SAFETY: Core 0 has finished writing and signaled us
+    let mut i2s_tx = unsafe { I2S_TX.take().unwrap() };
+
+    defmt::info!("Core 1: I2S audio loop started");
 
     // Start the I2S transmitter
     i2s_tx.start();
 
+    // Tight audio loop - runs forever on Core 1
     loop {
-        // Wait for audio sample from channel (yields to other tasks)
-        let (left, right) = AUDIO_CHANNEL.receive().await;
+        // SAFETY: Core 1 is the only consumer of the input buffer
+        let input = unsafe { &mut AUDIO_INPUT };
 
-        // Write to I2S (blocking write to FIFO)
-        i2s_tx.write(left as u32, right as u32);
+        if let Some(frame) = input.read_sample() {
+            // Audio data available - output it
+            // write() blocks until FIFO has space, naturally pacing to 96kHz
+            i2s_tx.write(frame.left as u32, frame.right as u32);
+        } else {
+            // No audio data - output silence
+            // This keeps the I2S clock running continuously
+            i2s_tx.write(0, 0);
+        }
     }
 }
