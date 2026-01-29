@@ -444,13 +444,14 @@ impl<'d, PIO: Instance, const SM: usize, DMA: Channel> SpdifRx<'d, PIO, SM, DMA>
 
     /// Detect S/PDIF signal and determine sample frequency
     pub async fn detect_signal(&mut self, common: &mut Common<'d, PIO>) -> bool {
-        info!("detect_signal: starting capture");
+        trace!("detect_signal: starting capture");
 
         let mut cfg = Config::default();
 
         // Load capture program only if not already loaded
         let origin = if let Some((origin, wrap_top, wrap_bottom)) = self.capture_info {
-            info!("detect_signal: reusing capture program at origin {}", origin);
+            trace!("detect_signal: reusing capture at origin {}, decode_info={}",
+                origin, self.decode_info.is_some());
             // Manually configure wrap points
             let mut exec = cfg.get_exec();
             exec.wrap_top = wrap_top;
@@ -459,10 +460,11 @@ impl<'d, PIO: Instance, const SM: usize, DMA: Channel> SpdifRx<'d, PIO, SM, DMA>
             unsafe { cfg.set_exec(exec) };
             origin
         } else {
-            info!("detect_signal: loading capture program");
+            trace!("detect_signal: loading capture program");
             let prg = pio_capture::program();
             let installed = common.load_program(&prg);
             let origin = installed.origin;
+            trace!("detect_signal: capture loaded at origin {}, size {}", origin, prg.code.len());
             let wrap_top = origin + installed.wrap.source;
             let wrap_bottom = origin + installed.wrap.target;
             self.capture_info = Some((origin, wrap_top, wrap_bottom));
@@ -494,19 +496,19 @@ impl<'d, PIO: Instance, const SM: usize, DMA: Channel> SpdifRx<'d, PIO, SM, DMA>
         self.sm.set_enable(true);
 
         // Capture samples with timeout
-        info!("detect_signal: starting DMA capture");
+        trace!("detect_signal: starting DMA capture");
         let mut capture_buf = [0u32; CAPTURE_SIZE];
         let capture_result = embassy_time::with_timeout(
             Duration::from_millis(100),
             self.sm.rx().dma_pull(self.dma.reborrow(), &mut capture_buf, false),
         )
         .await;
-        info!("detect_signal: DMA done, result={}", capture_result.is_ok());
+        trace!("detect_signal: DMA done, result={}", capture_result.is_ok());
 
         self.sm.set_enable(false);
 
         if capture_result.is_err() {
-            info!("S/PDIF capture timeout - no signal");
+            trace!("S/PDIF capture timeout - no signal");
             return false;
         }
 
@@ -604,7 +606,7 @@ impl<'d, PIO: Instance, const SM: usize, DMA: Channel> SpdifRx<'d, PIO, SM, DMA>
         let origin = if let Some((origin, _wrap_top, _wrap_bottom, loaded_variant)) = self.decode_info {
             if loaded_variant != decode_variant {
                 // Different variant needed - patch the program in place
-                info!("start_decode: patching decode program from {} to {} at origin {}",
+                trace!("start_decode: patching decode program from {} to {} at origin {}",
                     loaded_variant.as_hz(), decode_variant.as_hz(), origin);
 
                 // Get the new program's instructions
@@ -640,21 +642,45 @@ impl<'d, PIO: Instance, const SM: usize, DMA: Channel> SpdifRx<'d, PIO, SM, DMA>
                 exec.wrap_bottom = new_wrap_bottom;
                 unsafe { cfg.set_exec(exec) };
 
-                info!("start_decode: decode program patched successfully (wrap {}-{})",
+                trace!("start_decode: decode program patched successfully (wrap {}-{})",
                     new_wrap_bottom, new_wrap_top);
             } else {
-                info!("start_decode: reusing decode program at origin {}", origin);
-                // Manually configure wrap points for existing program
-                let (_, wrap_top, wrap_bottom, _) = self.decode_info.unwrap();
+                // Same variant - still rewrite program to PIO memory
+                // The capture program may have corrupted PIO state
+                trace!("start_decode: rewriting decode program at origin {}", origin);
+                let prg = get_decode_program(decode_variant);
+                let wrap_source = prg.wrap.source;
+                let wrap_target = prg.wrap.target;
+
+                // Write all instructions to PIO memory, relocating jump targets
+                for (i, &instr) in prg.code.iter().enumerate() {
+                    let relocated = if (instr >> 13) == 0 {
+                        let target = instr & 0x1f;
+                        let rest = instr & !0x1f;
+                        rest | ((target + origin as u16) & 0x1f)
+                    } else {
+                        instr
+                    };
+                    unsafe {
+                        write_pio_instr(self.pio_no, origin + i as u8, relocated);
+                    }
+                }
+
+                // Calculate fresh wrap points from the program (matching patching path)
+                let new_wrap_top = origin + wrap_source;
+                let new_wrap_bottom = origin + wrap_target;
+                self.decode_info = Some((origin, new_wrap_top, new_wrap_bottom, decode_variant));
+
+                // Configure wrap points
                 let mut exec = cfg.get_exec();
-                exec.wrap_top = wrap_top;
-                exec.wrap_bottom = wrap_bottom;
+                exec.wrap_top = new_wrap_top;
+                exec.wrap_bottom = new_wrap_bottom;
                 unsafe { cfg.set_exec(exec) };
             }
             origin
         } else {
             // First time loading decode program
-            info!("start_decode: loading decode program for {} Hz", decode_variant.as_hz());
+            trace!("start_decode: loading decode program for {} Hz", decode_variant.as_hz());
             let prg = match decode_variant {
                 SampleFreq::Hz48000 => pio_decode_48000::program(),
                 SampleFreq::Hz96000 => pio_decode_96000::program(),
@@ -663,6 +689,8 @@ impl<'d, PIO: Instance, const SM: usize, DMA: Channel> SpdifRx<'d, PIO, SM, DMA>
             };
             let installed = common.load_program(&prg);
             let origin = installed.origin;
+            trace!("start_decode: decode loaded at origin {}, size {}, capture_info={:?}",
+                origin, prg.code.len(), self.capture_info);
             let wrap_top = origin + installed.wrap.source;
             let wrap_bottom = origin + installed.wrap.target;
             self.decode_info = Some((origin, wrap_top, wrap_bottom, decode_variant));
@@ -686,6 +714,14 @@ impl<'d, PIO: Instance, const SM: usize, DMA: Channel> SpdifRx<'d, PIO, SM, DMA>
 
         self.sm.set_config(&cfg);
 
+        // Clear RX FIFO - may have stale data from capture phase
+        while !self.sm.rx().empty() {
+            let _ = self.sm.rx().pull();
+        }
+
+        // Restart state machine to clear internal state (shift registers, etc.)
+        self.sm.restart();
+
         // Set OSR to 0xFFFFFFFF (used for emitting 1s)
         // Execute: set x, 0; mov osr, !x
         // set x, 0: opcode=111, dest=x(001), data=0 -> 0xe020
@@ -693,8 +729,8 @@ impl<'d, PIO: Instance, const SM: usize, DMA: Channel> SpdifRx<'d, PIO, SM, DMA>
         unsafe {
             self.sm.exec_instr(0xe020); // set x, 0
             self.sm.exec_instr(0xa0e9); // mov osr, !x
-            // Jump to program origin (needed when reusing program)
-            self.sm.exec_instr(origin as u16);
+            // Jump to program origin
+            self.sm.exec_instr(0x0000 | origin as u16); // JMP origin
         }
 
         // Handle inverted signal
@@ -711,7 +747,7 @@ impl<'d, PIO: Instance, const SM: usize, DMA: Channel> SpdifRx<'d, PIO, SM, DMA>
         self.stable_count = 0;
         self.sync_lost_count = 0;
 
-        info!("S/PDIF decode started");
+        trace!("S/PDIF decode started");
     }
 
     /// Process incoming data from PIO FIFO (polling mode)
