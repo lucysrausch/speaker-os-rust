@@ -17,7 +17,7 @@ mod gui;
 mod hw;
 mod usb;
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use embassy_executor::Spawner;
 use embassy_rp::block::ImageDef;
 use embassy_rp::gpio::{Level, Output};
@@ -32,10 +32,9 @@ use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Timer};
 use static_cell::StaticCell;
 
-use crate::audio::{I2sTx, calculate_clock_divider, AudioRingBuffer, StereoFrame};
-use crate::audio::{SpdifRx, SpdifState, Resampler, SPDIF_RX_FIFO_SIZE, DMA_BLOCK_SIZE as SPDIF_DMA_BLOCK_SIZE};
+use crate::audio::{I2sTx, AudioRingBuffer, StereoFrame, ClockSpeed};
+use crate::audio::{SpdifRx, SpdifState, SPDIF_RX_FIFO_SIZE, DMA_BLOCK_SIZE as SPDIF_DMA_BLOCK_SIZE};
 use embassy_rp::peripherals::{PIO0, PIO1};
-use embassy_rp::pio::Common;
 
 use cortex_m::asm;
 use defmt_rtt as _;
@@ -90,13 +89,21 @@ static I2S_READY: AtomicBool = AtomicBool::new(false);
 /// Flag indicating S/PDIF is active (has priority over USB)
 static SPDIF_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// Pending I2S sample rate change (0 = no change pending)
+/// Core 0 writes, Core 1 reads and clears
+static PENDING_I2S_RATE: AtomicU32 = AtomicU32::new(0);
+
+/// Current I2S output sample rate
+/// Core 1 writes after rate change, Core 0 reads for DSP coefficient selection
+static CURRENT_I2S_RATE: AtomicU32 = AtomicU32::new(96_000);
+
 /// S/PDIF FIFO buffer (static allocation)
 static SPDIF_FIFO: StaticCell<[u32; SPDIF_RX_FIFO_SIZE]> = StaticCell::new();
 
 /// I2S output sample rate (fixed at 96kHz)
 const I2S_SAMPLE_RATE: u32 = 96_000;
 
-/// USB audio input sample rate (resampled to I2S rate if different)
+/// USB audio input sample rate (clock recovery handles drift)
 const USB_SAMPLE_RATE: u32 = 96_000;
 
 /// State update messages
@@ -181,7 +188,6 @@ async fn main(spawner: Spawner) {
     let _ = display.flush();
 
     let mut pio1 = Pio::new(p.PIO1, Irqs);
-    let clock_div = calculate_clock_divider(I2S_SAMPLE_RATE);
 
     let i2s_tx = I2sTx::new(
         &mut pio1.common,
@@ -189,7 +195,7 @@ async fn main(spawner: Spawner) {
         p.PIN_19, // AMP_BCLK
         p.PIN_20, // AMP_WCLK
         p.PIN_21, // AMP_DATA
-        clock_div,
+        I2S_SAMPLE_RATE,
     );
 
     // Store I2S in static for Core 1 to consume
@@ -346,10 +352,60 @@ async fn encoder_task(mut encoder: RotaryEncoder<'static>) {
     }
 }
 
-/// S/PDIF receiver task
+/// Calculate output rate for S/PDIF input rate
+///
+/// Rate mapping strategy:
+/// - 44.1k family (44.1, 88.2, 176.4) → 88.2 kHz output
+/// - 48k family (48, 96, 192) → 96 kHz output
+///
+/// This means I2S output is always 88.2kHz or 96kHz, with simple 2x resampling:
+/// - 44.1k → 88.2k (2x upsample)
+/// - 48k → 96k (2x upsample)
+/// - 88.2k → 88.2k (passthrough)
+/// - 96k → 96k (passthrough)
+/// - 176.4k → 88.2k (2x downsample)
+/// - 192k → 96k (2x downsample)
+fn calculate_output_rate(input_rate: u32) -> u32 {
+    // Determine rate family by checking if divisible by 44100 base
+    // 44.1k family: 44100, 88200, 176400
+    // 48k family: 48000, 96000, 192000
+    if input_rate % 44100 == 0 {
+        88_200
+    } else {
+        96_000
+    }
+}
+
+/// Calculate resampling mode for input/output rate pair
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResampleMode {
+    Passthrough,
+    Upsample2x,
+    Downsample2x,
+}
+
+fn calculate_resample_mode(input_rate: u32, output_rate: u32) -> ResampleMode {
+    if input_rate == output_rate {
+        ResampleMode::Passthrough
+    } else if input_rate * 2 == output_rate {
+        ResampleMode::Upsample2x
+    } else if input_rate == output_rate * 2 {
+        ResampleMode::Downsample2x
+    } else {
+        // Shouldn't happen with our rate mapping, but fallback to passthrough
+        ResampleMode::Passthrough
+    }
+}
+
+/// S/PDIF receiver task with clock recovery
 ///
 /// Monitors S/PDIF input for signal, detects sample rate, and streams audio
 /// to the shared ring buffer. When S/PDIF is active, it takes priority over USB.
+///
+/// Uses clock recovery architecture:
+/// - I2S output clock matches S/PDIF rate family (88.2k or 96k)
+/// - Simple 2x up/downsampling when needed
+/// - Adaptive clock adjustment on Core 1 keeps buffer stable
 ///
 /// Critical timing: The PIO hardware FIFO is only 8 words deep (~83µs at 96kHz).
 /// We use the same pattern as standalone spdif_to_i2s: run DMA while processing
@@ -363,7 +419,7 @@ async fn spdif_task(
 ) {
     use embassy_futures::join::join;
 
-    defmt::info!("S/PDIF task started");
+    defmt::info!("S/PDIF task started (clock recovery mode)");
 
     // Create S/PDIF receiver (PIO0, SM0)
     let mut spdif = SpdifRx::new(
@@ -375,13 +431,10 @@ async fn spdif_task(
         0, // PIO0
     );
 
-    // Create resampler (output always matches I2S rate)
-    let mut resampler = Resampler::new(I2S_SAMPLE_RATE);
-
     // Buffers for audio processing - keep small for low latency
     const RAW_BUF_SIZE: usize = 64; // Match DMA block size
     const STEREO_BUF_SIZE: usize = RAW_BUF_SIZE / 2; // 32 stereo frames
-    const OUTPUT_BUF_SIZE: usize = 128; // Room for 2.17x upsampling
+    const OUTPUT_BUF_SIZE: usize = 128; // Room for 2x upsampling
     let mut raw_buffer = [0u32; RAW_BUF_SIZE];
     let mut stereo_buffer = [StereoFrame::ZERO; STEREO_BUF_SIZE];
     let mut output_buffer = [StereoFrame::ZERO; OUTPUT_BUF_SIZE];
@@ -393,6 +446,10 @@ async fn spdif_task(
     // Track state to avoid flooding STATE_CHANNEL
     let mut notified_stable = false;
     let mut mute = true;
+    let mut current_resample_mode = ResampleMode::Passthrough;
+
+    // Previous sample for 2x upsampling interpolation
+    let mut prev_frame = StereoFrame::ZERO;
 
     loop {
         match spdif.state() {
@@ -402,18 +459,27 @@ async fn spdif_task(
                 notified_stable = false;
                 mute = true;
                 prev_count = 0;
+                prev_frame = StereoFrame::ZERO;
 
                 // Try to detect signal
                 if spdif.detect_signal(&mut pio0.common).await {
                     let sample_freq = spdif.sample_freq();
-                    let rate_hz = sample_freq.as_hz();
-                    defmt::info!("S/PDIF detected: {} Hz", rate_hz);
+                    let input_rate = sample_freq.as_hz();
+                    let output_rate = calculate_output_rate(input_rate);
+                    current_resample_mode = calculate_resample_mode(input_rate, output_rate);
 
-                    // Update resampler for new input rate
-                    resampler.set_input_rate(rate_hz);
+                    defmt::info!(
+                        "S/PDIF detected: {} Hz -> {} Hz ({:?})",
+                        input_rate,
+                        output_rate,
+                        defmt::Debug2Format(&current_resample_mode)
+                    );
 
-                    // Notify main of sample rate
-                    let _ = STATE_CHANNEL.try_send(AppStateUpdate::SampleRateChanged(rate_hz));
+                    // Request I2S rate change
+                    PENDING_I2S_RATE.store(output_rate, Ordering::Release);
+
+                    // Notify main of sample rate (show input rate on display)
+                    let _ = STATE_CHANNEL.try_send(AppStateUpdate::SampleRateChanged(input_rate));
 
                     // Start decoding
                     spdif.start_decode(&mut pio0.common);
@@ -462,15 +528,6 @@ async fn spdif_task(
                     defmt::info!("S/PDIF unmuted, FIFO: {}", fifo_count);
                 }
 
-                // Adjust resampler rate based on ring buffer level for drift compensation
-                {
-                    let input = unsafe { &AUDIO_INPUT };
-                    let available = input.available();
-                    // Scale to 0-255 where 128 = half full
-                    let buffer_level = ((available * 255) / crate::audio::BUFFER_SIZE).min(255) as u8;
-                    resampler.adjust_rate(buffer_level);
-                }
-
                 // Read from software FIFO into current buffer
                 let count = if !mute && fifo_count >= RAW_BUF_SIZE {
                     spdif.read_fifo(&mut raw_buffer)
@@ -493,11 +550,51 @@ async fn spdif_task(
                             );
                         }
 
-                        // Resample to 96kHz
-                        let output_count = resampler.process(
-                            &stereo_buffer[..num_frames],
-                            &mut output_buffer,
-                        );
+                        // Apply resampling based on mode
+                        let output_count = match current_resample_mode {
+                            ResampleMode::Passthrough => {
+                                // Direct copy
+                                for i in 0..num_frames {
+                                    output_buffer[i] = stereo_buffer[i];
+                                }
+                                num_frames
+                            }
+                            ResampleMode::Upsample2x => {
+                                // 2x upsample with linear interpolation
+                                let mut out_idx = 0;
+                                for i in 0..num_frames {
+                                    let curr = stereo_buffer[i];
+                                    // Interpolated sample (midpoint)
+                                    output_buffer[out_idx] = StereoFrame::new(
+                                        (prev_frame.left / 2) + (curr.left / 2),
+                                        (prev_frame.right / 2) + (curr.right / 2),
+                                    );
+                                    out_idx += 1;
+                                    // Original sample
+                                    output_buffer[out_idx] = curr;
+                                    out_idx += 1;
+                                    prev_frame = curr;
+                                }
+                                out_idx
+                            }
+                            ResampleMode::Downsample2x => {
+                                // 2x downsample (take every other sample with simple averaging)
+                                let mut out_idx = 0;
+                                let mut i = 0;
+                                while i + 1 < num_frames {
+                                    let s0 = stereo_buffer[i];
+                                    let s1 = stereo_buffer[i + 1];
+                                    // Average of two consecutive samples
+                                    output_buffer[out_idx] = StereoFrame::new(
+                                        (s0.left / 2) + (s1.left / 2),
+                                        (s0.right / 2) + (s1.right / 2),
+                                    );
+                                    out_idx += 1;
+                                    i += 2;
+                                }
+                                out_idx
+                            }
+                        };
 
                         // Write to shared ring buffer
                         // SAFETY: We hold SPDIF_ACTIVE, USB task will not write
@@ -526,10 +623,13 @@ async fn spdif_task(
                     notified_stable = false;
                     mute = true;
                     prev_count = 0;
+                    prev_frame = StereoFrame::ZERO;
                     spdif.reset();
                     let _ = STATE_CHANNEL.try_send(AppStateUpdate::SignalDetected(false));
                     let _ = STATE_CHANNEL.try_send(AppStateUpdate::SourceChanged(AudioSource::Usb));
                     let _ = STATE_CHANNEL.try_send(AppStateUpdate::SampleRateChanged(USB_SAMPLE_RATE));
+                    // Request USB rate when S/PDIF disconnects
+                    PENDING_I2S_RATE.store(USB_SAMPLE_RATE, Ordering::Release);
                 }
             }
         }
@@ -631,6 +731,8 @@ async fn usb_task(usb: embassy_rp::Peri<'static, USB>) {
                         // S/PDIF not active - USB can play
                         if !usb_active {
                             usb_active = true;
+                            // Request I2S rate change to USB rate
+                            PENDING_I2S_RATE.store(USB_SAMPLE_RATE, Ordering::Release);
                             let _ = STATE_CHANNEL.try_send(AppStateUpdate::SourceChanged(
                                 crate::gui::widgets::AudioSource::Usb,
                             ));
@@ -733,11 +835,15 @@ async fn usb_task(usb: embassy_rp::Peri<'static, USB>) {
     embassy_futures::join::join3(usb_fut, audio_fut, volume_fut).await;
 }
 
-/// Core 1 entry point - dedicated audio processing
+/// Core 1 entry point - dedicated audio processing with clock recovery
 ///
 /// Runs a tight loop that feeds the I2S FIFO from the ring buffer.
 /// No executor overhead - just reads samples and writes to PIO.
-/// The PIO FIFO naturally paces output to 96kHz.
+/// The PIO FIFO naturally paces output.
+///
+/// Key features:
+/// - Handles dynamic sample rate changes from Core 0 (PENDING_I2S_RATE)
+/// - Adaptive clock adjustment based on buffer level
 fn core1_audio_main() -> ! {
     // Wait for Core 0 to signal that I2S is ready
     while !I2S_READY.load(Ordering::Acquire) {
@@ -753,14 +859,57 @@ fn core1_audio_main() -> ! {
     // Start the I2S transmitter
     i2s_tx.start();
 
+    // Counter for periodic buffer level check (don't check every sample)
+    let mut check_counter: u32 = 0;
+    const CHECK_INTERVAL: u32 = 256; // Check every 256 samples (~2.7ms at 96kHz)
+
     // Tight audio loop - runs forever on Core 1
     loop {
+        // Check for rate change request from Core 0
+        let pending = PENDING_I2S_RATE.load(Ordering::Acquire);
+        if pending != 0 {
+            // Clear the pending flag first
+            PENDING_I2S_RATE.store(0, Ordering::Release);
+
+            let current = i2s_tx.sample_rate();
+            // Only reconfigure if rate is actually different
+            if current != pending {
+                defmt::info!("Core 1: Rate change {} -> {} Hz", current, pending);
+
+                // Stop I2S, reconfigure, clear buffer, restart
+                i2s_tx.stop();
+                i2s_tx.set_sample_rate(pending);
+                CURRENT_I2S_RATE.store(pending, Ordering::Release);
+                unsafe { AUDIO_INPUT.clear(); }
+                i2s_tx.start();
+
+                // Reset check counter
+                check_counter = 0;
+            } else {
+                defmt::debug!("Core 1: Already at {} Hz, skipping", pending);
+            }
+        }
+
+        // Periodic adaptive clock adjustment based on buffer level
+        check_counter = check_counter.wrapping_add(1);
+        if check_counter >= CHECK_INTERVAL {
+            check_counter = 0;
+
+            let available = unsafe { &AUDIO_INPUT }.available();
+            let speed = match available {
+                0..=63 => ClockSpeed::Slow,      // Buffer low, slow down output
+                64..=191 => ClockSpeed::Normal,  // Buffer OK (target ~128)
+                _ => ClockSpeed::Fast,           // Buffer high, speed up output
+            };
+            i2s_tx.adjust_clock(speed);
+        }
+
         // SAFETY: Core 1 is the only consumer of the input buffer
         let input = unsafe { &mut AUDIO_INPUT };
 
         if let Some(frame) = input.read_sample() {
             // Audio data available - output it
-            // write() blocks until FIFO has space, naturally pacing to 96kHz
+            // write() blocks until FIFO has space, naturally pacing output
             i2s_tx.write(frame.left as u32, frame.right as u32);
         } else {
             // No audio data - output silence
