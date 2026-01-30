@@ -31,6 +31,10 @@ pub struct Resampler {
     /// Current input sample (for interpolation)
     curr_left: i32,
     curr_right: i32,
+    /// Drift accumulator for passthrough mode (96kHz→96kHz)
+    drift_acc: i32,
+    /// Pending correction for passthrough: +1 = duplicate, -1 = skip
+    pending_correction: i32,
 }
 
 impl Resampler {
@@ -46,6 +50,8 @@ impl Resampler {
             prev_right: 0,
             curr_left: 0,
             curr_right: 0,
+            drift_acc: 0,
+            pending_correction: 0,
         }
     }
 
@@ -70,6 +76,8 @@ impl Resampler {
         self.prev_right = 0;
         self.curr_left = 0;
         self.curr_right = 0;
+        self.drift_acc = 0;
+        self.pending_correction = 0;
     }
 
     /// Get the current input rate
@@ -88,19 +96,36 @@ impl Resampler {
     /// - If buffer is filling up: speed up consumption (increase phase_inc)
     /// - If buffer is emptying: slow down consumption (decrease phase_inc)
     pub fn adjust_rate(&mut self, buffer_level: u8) {
-        // For passthrough mode, no adjustment needed (handled separately)
-        if self.is_passthrough() {
-            return;
-        }
-
         let error = buffer_level as i32 - 128;
 
-        // Adjustment range: ±0.5% of phase_inc_base
-        // This compensates for clock drift between S/PDIF source and I2S output
-        let max_adjust = (self.phase_inc_base / 200) as i32; // 0.5%
-        let adjust = (error * max_adjust) / 128;
+        if self.is_passthrough() {
+            // For passthrough mode (96kHz→96kHz): accumulate drift and occasionally skip/duplicate
+            // Dead zone: ±32 around target for stability
+            if error.abs() < 32 {
+                return;
+            }
 
-        self.phase_inc = ((self.phase_inc_base as i32) + adjust).max(1) as u32;
+            // Accumulate drift based on buffer error
+            let drift_rate = (error - error.signum() * 32) / 4;
+            self.drift_acc += drift_rate;
+
+            // When drift exceeds threshold, schedule a correction
+            const CORRECTION_THRESHOLD: i32 = 500;
+            if self.drift_acc > CORRECTION_THRESHOLD {
+                self.pending_correction = -1; // Skip one sample (buffer too full)
+                self.drift_acc = 0;
+            } else if self.drift_acc < -CORRECTION_THRESHOLD {
+                self.pending_correction = 1; // Duplicate one sample (buffer too empty)
+                self.drift_acc = 0;
+            }
+        } else {
+            // For interpolation mode: continuous phase adjustment
+            // Adjustment range: ±0.5% of phase_inc_base
+            let max_adjust = (self.phase_inc_base / 200) as i32; // 0.5%
+            let adjust = (error * max_adjust) / 128;
+
+            self.phase_inc = ((self.phase_inc_base as i32) + adjust).max(1) as u32;
+        }
     }
 
     /// Process input samples and produce output samples
@@ -111,10 +136,8 @@ impl Resampler {
     /// Returns the number of output samples written
     pub fn process(&mut self, input: &[StereoFrame], output: &mut [StereoFrame]) -> usize {
         if self.is_passthrough() {
-            // Direct copy for same-rate
-            let count = input.len().min(output.len());
-            output[..count].copy_from_slice(&input[..count]);
-            return count;
+            // Passthrough with occasional skip/duplicate for drift compensation
+            return self.process_passthrough(input, output);
         }
 
         let mut input_idx = 0usize;
@@ -152,6 +175,48 @@ impl Resampler {
 
             // Advance phase
             self.phase += self.phase_inc;
+        }
+
+        output_idx
+    }
+
+    /// Process passthrough mode (96kHz→96kHz) with drift compensation
+    /// Occasionally skips or duplicates a sample to compensate for clock drift
+    fn process_passthrough(&mut self, input: &[StereoFrame], output: &mut [StereoFrame]) -> usize {
+        let mut input_idx = 0usize;
+        let mut output_idx = 0usize;
+
+        while input_idx < input.len() && output_idx < output.len() {
+            // Check for skip correction (buffer too full - consume without outputting)
+            if self.pending_correction < 0 {
+                self.pending_correction = 0;
+                input_idx += 1; // Skip this input sample
+                continue;
+            }
+
+            // Normal passthrough
+            output[output_idx] = input[input_idx];
+            output_idx += 1;
+            input_idx += 1;
+
+            // Check for duplicate correction (buffer too empty - output same sample again)
+            if self.pending_correction > 0 && output_idx < output.len() {
+                // Duplicate by outputting an interpolated sample
+                if input_idx < input.len() {
+                    // Interpolate between current and next for smoother duplicate
+                    let curr = input[input_idx - 1];
+                    let next = input[input_idx];
+                    output[output_idx] = StereoFrame::new(
+                        (curr.left / 2) + (next.left / 2),
+                        (curr.right / 2) + (next.right / 2),
+                    );
+                } else {
+                    // No next sample, just duplicate
+                    output[output_idx] = input[input_idx - 1];
+                }
+                output_idx += 1;
+                self.pending_correction = 0;
+            }
         }
 
         output_idx
@@ -197,10 +262,13 @@ impl Resampler {
     /// Reset the resampler state (call when input stream changes)
     pub fn reset(&mut self) {
         self.phase = 0;
+        self.phase_inc = self.phase_inc_base;
         self.prev_left = 0;
         self.prev_right = 0;
         self.curr_left = 0;
         self.curr_right = 0;
+        self.drift_acc = 0;
+        self.pending_correction = 0;
     }
 }
 
