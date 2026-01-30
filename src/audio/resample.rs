@@ -13,7 +13,7 @@ const FRAC_BITS: u32 = 16;
 const FRAC_MASK: u32 = (1 << FRAC_BITS) - 1;
 const FRAC_ONE: u32 = 1 << FRAC_BITS;
 
-/// Linear interpolation resampler
+/// Linear interpolation resampler with drift compensation
 pub struct Resampler {
     /// Input sample rate
     input_rate: u32,
@@ -21,7 +21,9 @@ pub struct Resampler {
     output_rate: u32,
     /// Phase accumulator (fixed-point: upper bits = integer, lower FRAC_BITS = fraction)
     phase: u32,
-    /// Phase increment per output sample (fixed-point)
+    /// Base phase increment (calculated from sample rates)
+    phase_inc_base: u32,
+    /// Current phase increment (adjusted for drift compensation)
     phase_inc: u32,
     /// Previous input sample (for interpolation)
     prev_left: i32,
@@ -38,7 +40,8 @@ impl Resampler {
             input_rate: output_rate, // Start with passthrough
             output_rate,
             phase: 0,
-            phase_inc: FRAC_ONE, // 1:1 ratio initially
+            phase_inc_base: FRAC_ONE, // 1:1 ratio initially
+            phase_inc: FRAC_ONE,
             prev_left: 0,
             prev_right: 0,
             curr_left: 0,
@@ -58,7 +61,8 @@ impl Resampler {
         // Phase increment = input_rate / output_rate in fixed-point
         // For upsampling (48k→96k): phase_inc = 0.5 (consume half an input per output)
         // For downsampling (192k→96k): phase_inc = 2.0 (consume 2 inputs per output)
-        self.phase_inc = ((input_rate as u64 * FRAC_ONE as u64) / self.output_rate as u64) as u32;
+        self.phase_inc_base = ((input_rate as u64 * FRAC_ONE as u64) / self.output_rate as u64) as u32;
+        self.phase_inc = self.phase_inc_base;
 
         // Reset state
         self.phase = 0;
@@ -76,6 +80,27 @@ impl Resampler {
     /// Check if this is a passthrough configuration (96k→96k)
     pub fn is_passthrough(&self) -> bool {
         self.input_rate == self.output_rate
+    }
+
+    /// Adjust the resampling rate based on buffer level for clock drift compensation
+    ///
+    /// `buffer_level` is 0-255 where 128 is the target (half full).
+    /// - If buffer is filling up: speed up consumption (increase phase_inc)
+    /// - If buffer is emptying: slow down consumption (decrease phase_inc)
+    pub fn adjust_rate(&mut self, buffer_level: u8) {
+        // For passthrough mode, no adjustment needed (handled separately)
+        if self.is_passthrough() {
+            return;
+        }
+
+        let error = buffer_level as i32 - 128;
+
+        // Adjustment range: ±0.5% of phase_inc_base
+        // This compensates for clock drift between S/PDIF source and I2S output
+        let max_adjust = (self.phase_inc_base / 200) as i32; // 0.5%
+        let adjust = (error * max_adjust) / 128;
+
+        self.phase_inc = ((self.phase_inc_base as i32) + adjust).max(1) as u32;
     }
 
     /// Process input samples and produce output samples

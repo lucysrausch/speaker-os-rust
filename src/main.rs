@@ -462,6 +462,15 @@ async fn spdif_task(
                     defmt::info!("S/PDIF unmuted, FIFO: {}", fifo_count);
                 }
 
+                // Adjust resampler rate based on ring buffer level for drift compensation
+                {
+                    let input = unsafe { &AUDIO_INPUT };
+                    let available = input.available();
+                    // Scale to 0-255 where 128 = half full
+                    let buffer_level = ((available * 255) / crate::audio::BUFFER_SIZE).min(255) as u8;
+                    resampler.adjust_rate(buffer_level);
+                }
+
                 // Read from software FIFO into current buffer
                 let count = if !mute && fifo_count >= RAW_BUF_SIZE {
                     spdif.read_fifo(&mut raw_buffer)

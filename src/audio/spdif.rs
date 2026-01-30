@@ -25,8 +25,8 @@ const PIO_INSTR_MEM_OFFSET: usize = 0x048;
 /// S/PDIF block size (sub-frames per block)
 pub const SPDIF_BLOCK_SIZE: usize = 384;
 
-/// Number of blocks in FIFO
-const NUM_BLOCKS: usize = 8;
+/// Number of blocks in FIFO (2 blocks = ~4.4ms @ 44.1kHz)
+const NUM_BLOCKS: usize = 2;
 
 /// Total FIFO size
 pub const SPDIF_RX_FIFO_SIZE: usize = NUM_BLOCKS * SPDIF_BLOCK_SIZE;
