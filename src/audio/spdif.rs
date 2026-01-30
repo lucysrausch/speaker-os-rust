@@ -926,7 +926,7 @@ impl<'d, PIO: Instance, const SM: usize, DMA: Channel> SpdifRx<'d, PIO, SM, DMA>
 pub fn extract_audio(word: u32) -> i32 {
     // S/PDIF format: [31:28] VUCP, [27:4] 24-bit audio, [3:0] Sync
     // Shift left 4 to align to MSB, then right 1 to attenuate
-    (((word & 0x0FFF_FFF0) << 4) as i32) >> 1
+    (((word & 0x0FFF_FFF0) << 4) as i32)
 }
 
 /// Check if word is left channel (Sync B or Sync M)

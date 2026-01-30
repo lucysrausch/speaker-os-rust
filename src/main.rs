@@ -771,8 +771,8 @@ async fn usb_task(usb: embassy_rp::Peri<'static, USB>) {
                                 right_24
                             };
 
-                            // Shift left by 7 (8 to MSB-align, then >> 1 to attenuate and prevent clipping)
-                            let frame = StereoFrame::new(left << 7, right << 7);
+                            // Shift left by 8 to MSB-align 24-bit audio to 32-bit
+                            let frame = StereoFrame::new(left << 8, right << 8);
                             input.write_sample(frame);
                         }
                     }
