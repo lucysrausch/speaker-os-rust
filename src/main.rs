@@ -152,7 +152,7 @@ async fn main(spawner: Spawner) {
     let mut display: GraphicsMode<_> = Builder::new()
         .with_i2c_addr(i2c_addr::SH1106)
         .with_size(DisplaySize::Display128x64)
-        .with_rotation(DisplayRotation::Rotate0)
+        .with_rotation(DisplayRotation::Rotate180)
         .connect_i2c(i2c0)
         .into();
 
