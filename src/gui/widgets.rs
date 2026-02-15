@@ -189,19 +189,30 @@ impl SourceIndicator {
     }
 }
 
+/// Signal status for the status bar
+#[derive(Debug, Clone, Copy, PartialEq, Eq, defmt::Format)]
+pub enum SignalStatus {
+    /// No signal (connected but receiving silence)
+    NoSignal,
+    /// Signal present and OK
+    Ok,
+    /// Signal is clipping
+    Clip,
+}
+
 /// Status bar widget for the top of the screen
 pub struct StatusBar {
     pub source: AudioSource,
     pub sample_rate: u32,
-    pub signal_present: bool,
+    pub signal_status: SignalStatus,
 }
 
 impl StatusBar {
-    pub fn new(source: AudioSource, sample_rate: u32, signal_present: bool) -> Self {
+    pub fn new(source: AudioSource, sample_rate: u32, signal_status: SignalStatus) -> Self {
         Self {
             source,
             sample_rate,
-            signal_present,
+            signal_status,
         }
     }
 
@@ -235,16 +246,19 @@ impl StatusBar {
         )
         .draw(display)?;
 
-        // Draw signal indicator on right
-        if self.signal_present {
-            Text::with_alignment(
-                "SIG OK",
-                Point::new(126, 10),
-                text_style(),
-                Alignment::Right,
-            )
-            .draw(display)?;
-        }
+        // Draw signal status on right
+        let status_text = match self.signal_status {
+            SignalStatus::NoSignal => "NO SIG",
+            SignalStatus::Ok => "SIG OK",
+            SignalStatus::Clip => "CLIP",
+        };
+        Text::with_alignment(
+            status_text,
+            Point::new(126, 10),
+            text_style(),
+            Alignment::Right,
+        )
+        .draw(display)?;
 
         // Draw separator line
         Rectangle::new(
@@ -337,6 +351,54 @@ impl LevelMeter {
         self.draw_channel(display, "L", self.left_level, self.left_peak, y)?;
         // Right channel
         self.draw_channel(display, "R", self.right_level, self.right_peak, y + 7)?;
+        Ok(())
+    }
+
+    /// Draw only the bar fills and peak holds (no outlines or labels).
+    ///
+    /// Use this for fast partial updates — caller should clear the bar
+    /// interiors first. Only dirties pages containing the fill pixels.
+    pub fn draw_fills<D>(&self, display: &mut D, y: i32) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = BinaryColor>,
+    {
+        self.draw_fill(display, self.left_level, self.left_peak, y)?;
+        self.draw_fill(display, self.right_level, self.right_peak, y + 7)?;
+        Ok(())
+    }
+
+    fn draw_fill<D>(
+        &self,
+        display: &mut D,
+        level: u8,
+        peak: u8,
+        y: i32,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = BinaryColor>,
+    {
+        // Filled bar (current level) — inside the 1px outline
+        let fill_width = (level as u32 * Self::BAR_WIDTH) / 100;
+        if fill_width > 0 {
+            Rectangle::new(
+                Point::new(Self::BAR_X + 1, y + 1),
+                Size::new(fill_width, Self::BAR_HEIGHT),
+            )
+            .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+            .draw(display)?;
+        }
+
+        // Peak hold indicator (1px wide vertical line)
+        if peak > 0 {
+            let peak_x = Self::BAR_X + 1 + (peak as u32 * Self::BAR_WIDTH / 100).min(Self::BAR_WIDTH - 1) as i32;
+            Rectangle::new(
+                Point::new(peak_x, y + 1),
+                Size::new(1, Self::BAR_HEIGHT),
+            )
+            .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+            .draw(display)?;
+        }
+
         Ok(())
     }
 

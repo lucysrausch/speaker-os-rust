@@ -52,7 +52,7 @@ bind_interrupts!(struct Irqs {
 use crate::drivers::{RotaryEncoder, Tas5830};
 use crate::gui::display::Sh1106;
 use crate::gui::screens::{AppState, HomeScreen, BootScreen};
-use crate::gui::widgets::AudioSource;
+use crate::gui::widgets::{AudioSource, SignalStatus};
 use crate::hw::pins::i2c_addr;
 
 // RP2350 boot block - required for the chip to boot
@@ -291,7 +291,7 @@ async fn main(spawner: Spawner) {
     let mut home_screen = HomeScreen::new();
     let mut app_state = AppState::default();
     app_state.source = AudioSource::LineIn;
-    app_state.signal_present = true;
+    app_state.signal_status = SignalStatus::Ok;
 
     let _ = home_screen.draw(&mut display, &app_state);
     let _ = display.flush_all().await;
@@ -336,24 +336,25 @@ async fn main(spawner: Spawner) {
         if spdif_active && !prev_spdif_active {
             ACTIVE_SOURCE.store(SOURCE_SPDIF, Ordering::Release);
             app_state.source = AudioSource::Spdif;
-            app_state.signal_present = true;
+            // Signal status will be updated by metering logic below
+            // Sample rate is updated via SampleRateChanged from spdif_task
             source_changed = true;
             defmt::info!("Source: S/PDIF (signal detected)");
         }
 
         // S/PDIF falling edge: signal just lost → fallback
         if !spdif_active && prev_spdif_active {
-            app_state.signal_present = false;
             if vbus_present {
                 ACTIVE_SOURCE.store(SOURCE_USB, Ordering::Release);
                 PENDING_I2S_RATE.store(USB_SAMPLE_RATE, Ordering::Release);
                 app_state.source = AudioSource::Usb;
+                app_state.sample_rate = USB_SAMPLE_RATE;
                 defmt::info!("Source: USB (S/PDIF lost, USB connected)");
             } else {
                 ACTIVE_SOURCE.store(SOURCE_LINEIN, Ordering::Release);
                 PENDING_I2S_RATE.store(I2S_SAMPLE_RATE, Ordering::Release);
                 app_state.source = AudioSource::LineIn;
-                app_state.signal_present = true;
+                app_state.sample_rate = I2S_SAMPLE_RATE;
                 defmt::info!("Source: Line-in (S/PDIF lost)");
             }
             source_changed = true;
@@ -364,6 +365,7 @@ async fn main(spawner: Spawner) {
             ACTIVE_SOURCE.store(SOURCE_USB, Ordering::Release);
             PENDING_I2S_RATE.store(USB_SAMPLE_RATE, Ordering::Release);
             app_state.source = AudioSource::Usb;
+            app_state.sample_rate = USB_SAMPLE_RATE;
             source_changed = true;
             defmt::info!("Source: USB (cable connected)");
         }
@@ -373,12 +375,13 @@ async fn main(spawner: Spawner) {
             if spdif_active {
                 ACTIVE_SOURCE.store(SOURCE_SPDIF, Ordering::Release);
                 app_state.source = AudioSource::Spdif;
+                // Keep current S/PDIF sample rate (already set by spdif_task)
                 defmt::info!("Source: S/PDIF (USB unplugged)");
             } else {
                 ACTIVE_SOURCE.store(SOURCE_LINEIN, Ordering::Release);
                 PENDING_I2S_RATE.store(I2S_SAMPLE_RATE, Ordering::Release);
                 app_state.source = AudioSource::LineIn;
-                app_state.signal_present = true;
+                app_state.sample_rate = I2S_SAMPLE_RATE;
                 defmt::info!("Source: Line-in (USB unplugged)");
             }
             source_changed = true;
@@ -437,13 +440,10 @@ async fn main(spawner: Spawner) {
             // Peak hold with slow decay
             peak_hold_left = peak_hold_left.max(level_left);
             peak_hold_right = peak_hold_right.max(level_right);
-            //peak_decay_counter += 1;
-            //if peak_decay_counter >= 4 {
-                // Decay 1 unit every 500ms
-                //peak_decay_counter = 0;
-                peak_hold_left = peak_hold_left.saturating_sub(1);
-                peak_hold_right = peak_hold_right.saturating_sub(1);
-            //}
+
+            peak_hold_left = peak_hold_left.saturating_sub(1);
+            peak_hold_right = peak_hold_right.saturating_sub(1);
+            
             app_state.peak_left = peak_hold_left;
             app_state.peak_right = peak_hold_right;
 
@@ -469,17 +469,40 @@ async fn main(spawner: Spawner) {
                 clip_flash_counter = 0;
             }
 
-            // Partial update: meters + volume/clip area, flush dirty pages
+            // Update signal status based on actual audio content
+            let new_signal_status = if app_state.clipping {
+                SignalStatus::Clip
+            } else if raw_left > 0 || raw_right > 0 {
+                SignalStatus::Ok
+            } else {
+                SignalStatus::NoSignal
+            };
+            if new_signal_status != app_state.signal_status {
+                app_state.signal_status = new_signal_status;
+                display_dirty = true; // Status bar needs full redraw
+            }
+
+            // Partial update: only bar fill pixels (2 pages dirty instead of 6)
             let _ = home_screen.draw_meters(&mut display, &app_state);
-            let _ = display.flush().await;
+
+            // Only redraw volume/clip area when clip state actually changes
+            if app_state.clip_flash != prev_clip_flash {
+                prev_clip_flash = app_state.clip_flash;
+                let _ = home_screen.draw_clip_region(&mut display, &app_state);
+            }
         }
 
         // Full redraw for UI text/state changes (source, volume, mute, sample rate)
         if display_dirty {
             display_dirty = false;
             let _ = home_screen.draw(&mut display, &app_state);
-            let _ = display.flush_all().await;
+            // Mark all pages dirty for full redraw
         }
+
+        // Flush at most ONE dirty page per tick (~2.5ms I2C write).
+        // This spreads display updates over multiple ticks instead of
+        // bursting all dirty pages at once, preventing audio stutter.
+        let _ = display.flush_one_page().await;
 
         // Small yield to prevent busy-looping
         Timer::after(Duration::from_millis(10)).await;

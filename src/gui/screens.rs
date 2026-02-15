@@ -9,7 +9,7 @@ use embedded_graphics::{
 use super::{
     clear_display, title_style, text_style,
     display::Sh1106,
-    widgets::{AudioSource, ClipWarning, LargeVolumeDisplay, LevelMeter, StatusBar, VolumeBar},
+    widgets::{AudioSource, ClipWarning, LargeVolumeDisplay, LevelMeter, SignalStatus, StatusBar, VolumeBar},
     menu::{Menu, MenuAction, create_main_menu, create_source_menu},
     DISPLAY_HEIGHT, DISPLAY_WIDTH,
 };
@@ -40,7 +40,7 @@ pub struct AppState {
     pub muted: bool,
     pub source: AudioSource,
     pub source_locked: bool,
-    pub signal_present: bool,
+    pub signal_status: SignalStatus,
     pub sample_rate: u32,
     pub eq_enabled: bool,
     /// Level meter: current bar level (0-100)
@@ -62,7 +62,7 @@ impl Default for AppState {
             muted: false,
             source: AudioSource::None,
             source_locked: false,
-            signal_present: false,
+            signal_status: SignalStatus::NoSignal,
             sample_rate: 96000,
             eq_enabled: false,
             level_left: 0,
@@ -109,7 +109,7 @@ impl HomeScreen {
         clear_display(display)?;
 
         // Status bar at top (y=0-13)
-        let status = StatusBar::new(state.source, state.sample_rate, state.signal_present);
+        let status = StatusBar::new(state.source, state.sample_rate, state.signal_status);
         status.draw(display)?;
 
         // Level meters (y=15, takes ~14px)
@@ -141,26 +141,40 @@ impl HomeScreen {
         Ok(())
     }
 
-    /// Draw only the level meters and clip/volume area (partial update).
+    /// Draw only the level meter bar fills (minimal dirty pages).
     ///
-    /// Clears and redraws just the bar interiors and volume/clip region,
-    /// then the caller flushes only dirty pages via async I2C.
+    /// Only clears and redraws the bar interior pixels (not outlines or labels),
+    /// dirtying just pages 2-3 instead of pages 1-6. This drastically reduces
+    /// I2C traffic per meter update.
     pub fn draw_meters<I2C: embedded_hal_async::i2c::I2c>(
         &self,
         display: &mut Sh1106<I2C>,
         state: &AppState,
     ) -> Result<(), core::convert::Infallible> {
-        // Clear meter bar area (y=15..29)
-        display.clear_region(0, 15, DISPLAY_WIDTH, 14);
+        // Only clear the bar fill interiors, not outlines or labels.
+        // L bar fill: y=16..19 (4px tall), x=11..124 (inside 1px outline)
+        // R bar fill: y=23..26 (4px tall), x=11..124
+        display.clear_region(11, 16, 114, 4);  // L bar interior
+        display.clear_region(11, 23, 114, 4);  // R bar interior
 
-        // Redraw meter bars
+        // Redraw just the bar fills and peak holds (not outlines/labels)
         let meter = LevelMeter::new(
             state.level_left, state.level_right,
             state.peak_left, state.peak_right,
         );
-        meter.draw(display, 15)?;
+        meter.draw_fills(display, 15)?;
 
-        // Clear and redraw the volume/clip area (y=30..56)
+        Ok(())
+    }
+
+    /// Draw the volume/clip area below the meters.
+    ///
+    /// Call this only when clip state actually changes, not every meter tick.
+    pub fn draw_clip_region<I2C: embedded_hal_async::i2c::I2c>(
+        &self,
+        display: &mut Sh1106<I2C>,
+        state: &AppState,
+    ) -> Result<(), core::convert::Infallible> {
         display.clear_region(0, 30, DISPLAY_WIDTH, 26);
         if state.clipping && state.clip_flash {
             ClipWarning::draw(display, 43)?;
@@ -168,7 +182,6 @@ impl HomeScreen {
             let vol_display = LargeVolumeDisplay::new(state.volume, state.muted);
             vol_display.draw_at(display, 48)?;
         }
-
         Ok(())
     }
 
