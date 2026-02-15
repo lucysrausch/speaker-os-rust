@@ -17,7 +17,7 @@ mod gui;
 mod hw;
 mod usb;
 
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use embassy_executor::Spawner;
 use embassy_rp::block::ImageDef;
 use embassy_rp::gpio::{Level, Output};
@@ -32,7 +32,7 @@ use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Timer};
 use static_cell::StaticCell;
 
-use crate::audio::{I2sTx, AudioRingBuffer, StereoFrame, ClockSpeed};
+use crate::audio::{I2sTx, I2sRx, AudioRingBuffer, StereoFrame, ClockSpeed};
 use crate::audio::{SpdifRx, SpdifState, SPDIF_RX_FIFO_SIZE, DMA_BLOCK_SIZE as SPDIF_DMA_BLOCK_SIZE};
 use embassy_rp::peripherals::{PIO0, PIO1};
 
@@ -83,11 +83,22 @@ static mut CORE1_STACK: Stack<4096> = Stack::new();
 /// I2S transmitter - initialized by Core 0, consumed by Core 1
 static mut I2S_TX: Option<I2sTx<'static, PIO1, 0>> = None;
 
+/// I2S receiver - initialized by Core 0, consumed by Core 1
+static mut I2S_RX: Option<I2sRx<'static, PIO1, 1>> = None;
+
 /// Flag to signal Core 1 that I2S is ready
 static I2S_READY: AtomicBool = AtomicBool::new(false);
 
-/// Flag indicating S/PDIF is active (has priority over USB)
+/// Flag indicating S/PDIF signal is present (set/cleared by spdif_task)
 static SPDIF_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Active audio source (0=LineIn, 1=Spdif, 2=Usb)
+/// Managed by main loop based on connection events (last connected wins).
+static ACTIVE_SOURCE: AtomicU8 = AtomicU8::new(SOURCE_LINEIN);
+
+const SOURCE_LINEIN: u8 = 0;
+const SOURCE_SPDIF: u8 = 1;
+const SOURCE_USB: u8 = 2;
 
 /// Pending I2S sample rate change (0 = no change pending)
 /// Core 0 writes, Core 1 reads and clears
@@ -198,10 +209,21 @@ async fn main(spawner: Spawner) {
         I2S_SAMPLE_RATE,
     );
 
-    // Store I2S in static for Core 1 to consume
+    // Initialize I2S receiver for line-in ADC (PIO1 SM1)
+    let i2s_rx = I2sRx::new(
+        &mut pio1.common,
+        pio1.sm1,
+        p.PIN_23, // ADC_BCLK
+        p.PIN_24, // ADC_WCLK
+        p.PIN_25, // ADC_DATA
+        I2S_SAMPLE_RATE,
+    );
+
+    // Store I2S TX and RX in statics
     // SAFETY: Core 1 hasn't started yet, no race condition
     unsafe {
         I2S_TX = Some(i2s_tx);
+        I2S_RX = Some(i2s_rx);
     }
 
     // Spawn Core 1 for dedicated audio processing
@@ -252,6 +274,9 @@ async fn main(spawner: Spawner) {
     // Spawn the USB task
     spawner.spawn(usb_task(p.USB)).unwrap();
 
+    // USB VBUS sense pin (GPIO29 via 5.1k:10k voltage divider)
+    let usb_vbus = embassy_rp::gpio::Input::new(p.PIN_29, embassy_rp::gpio::Pull::None);
+
     defmt::info!("Boot complete!");
     boot_screen.set_progress(100, "Ready!");
     let _ = boot_screen.draw(&mut display, &app_state);
@@ -272,9 +297,88 @@ async fn main(spawner: Spawner) {
 
     defmt::info!("Entering main loop");
 
-    // Main loop: handle state updates and refresh display
+    // Source arbitration state (edge detection)
+    let mut prev_spdif_active = false;
+    let mut prev_vbus_present = usb_vbus.is_high();
+
+    // If USB is already connected at boot, start with USB
+    if prev_vbus_present {
+        ACTIVE_SOURCE.store(SOURCE_USB, Ordering::Release);
+        app_state.source = AudioSource::Usb;
+        PENDING_I2S_RATE.store(USB_SAMPLE_RATE, Ordering::Release);
+        let _ = home_screen.draw(&mut display, &app_state);
+        let _ = display.flush();
+        defmt::info!("USB connected at boot");
+    }
+
+    // Main loop: source arbitration, state updates, display refresh
     loop {
-        // Check for state updates
+        // --- Source arbitration (last connected wins) ---
+        let spdif_active = SPDIF_ACTIVE.load(Ordering::Acquire);
+        let vbus_present = usb_vbus.is_high();
+        let mut source_changed = false;
+
+        // S/PDIF rising edge: signal just appeared → switch to S/PDIF
+        if spdif_active && !prev_spdif_active {
+            ACTIVE_SOURCE.store(SOURCE_SPDIF, Ordering::Release);
+            app_state.source = AudioSource::Spdif;
+            app_state.signal_present = true;
+            source_changed = true;
+            defmt::info!("Source: S/PDIF (signal detected)");
+        }
+
+        // S/PDIF falling edge: signal just lost → fallback
+        if !spdif_active && prev_spdif_active {
+            app_state.signal_present = false;
+            if vbus_present {
+                ACTIVE_SOURCE.store(SOURCE_USB, Ordering::Release);
+                PENDING_I2S_RATE.store(USB_SAMPLE_RATE, Ordering::Release);
+                app_state.source = AudioSource::Usb;
+                defmt::info!("Source: USB (S/PDIF lost, USB connected)");
+            } else {
+                ACTIVE_SOURCE.store(SOURCE_LINEIN, Ordering::Release);
+                PENDING_I2S_RATE.store(I2S_SAMPLE_RATE, Ordering::Release);
+                app_state.source = AudioSource::LineIn;
+                app_state.signal_present = true;
+                defmt::info!("Source: Line-in (S/PDIF lost)");
+            }
+            source_changed = true;
+        }
+
+        // USB VBUS rising edge: cable just plugged in → switch to USB
+        if vbus_present && !prev_vbus_present {
+            ACTIVE_SOURCE.store(SOURCE_USB, Ordering::Release);
+            PENDING_I2S_RATE.store(USB_SAMPLE_RATE, Ordering::Release);
+            app_state.source = AudioSource::Usb;
+            source_changed = true;
+            defmt::info!("Source: USB (cable connected)");
+        }
+
+        // USB VBUS falling edge: cable just unplugged → fallback
+        if !vbus_present && prev_vbus_present {
+            if spdif_active {
+                ACTIVE_SOURCE.store(SOURCE_SPDIF, Ordering::Release);
+                app_state.source = AudioSource::Spdif;
+                defmt::info!("Source: S/PDIF (USB unplugged)");
+            } else {
+                ACTIVE_SOURCE.store(SOURCE_LINEIN, Ordering::Release);
+                PENDING_I2S_RATE.store(I2S_SAMPLE_RATE, Ordering::Release);
+                app_state.source = AudioSource::LineIn;
+                app_state.signal_present = true;
+                defmt::info!("Source: Line-in (USB unplugged)");
+            }
+            source_changed = true;
+        }
+
+        prev_spdif_active = spdif_active;
+        prev_vbus_present = vbus_present;
+
+        if source_changed {
+            let _ = home_screen.draw(&mut display, &app_state);
+            let _ = display.flush();
+        }
+
+        // --- Handle state updates from tasks ---
         if let Ok(update) = STATE_CHANNEL.try_receive() {
             match update {
                 AppStateUpdate::VolumeChanged(vol) => {
@@ -291,15 +395,11 @@ async fn main(spawner: Spawner) {
                         let _ = amp.unmute().await;
                     }
                 }
-                AppStateUpdate::SourceChanged(source) => {
-                    app_state.source = source;
-                }
-                AppStateUpdate::SignalDetected(detected) => {
-                    app_state.signal_present = detected;
-                }
                 AppStateUpdate::SampleRateChanged(rate) => {
                     app_state.sample_rate = rate;
                 }
+                // SourceChanged and SignalDetected now handled by source arbitration above
+                _ => {}
             }
 
             // Refresh display
@@ -511,14 +611,11 @@ async fn spdif_task(
             }
 
             SpdifState::Stable => {
-                // S/PDIF is stable - take priority over USB
+                // S/PDIF is stable - signal main loop via SPDIF_ACTIVE
                 SPDIF_ACTIVE.store(true, Ordering::Release);
 
-                // Notify main ONCE when we become stable
                 if !notified_stable {
                     notified_stable = true;
-                    let _ = STATE_CHANNEL.try_send(AppStateUpdate::SourceChanged(AudioSource::Spdif));
-                    let _ = STATE_CHANNEL.try_send(AppStateUpdate::SignalDetected(true));
                 }
 
                 // Unmute when software FIFO is reasonably full (like standalone code)
@@ -596,11 +693,12 @@ async fn spdif_task(
                             }
                         };
 
-                        // Write to shared ring buffer
-                        // SAFETY: We hold SPDIF_ACTIVE, USB task will not write
-                        let input = unsafe { &mut AUDIO_INPUT };
-                        for i in 0..output_count {
-                            input.write_sample(output_buffer[i]);
+                        // Write to shared ring buffer if S/PDIF is the active source
+                        if ACTIVE_SOURCE.load(Ordering::Relaxed) == SOURCE_SPDIF {
+                            let input = unsafe { &mut AUDIO_INPUT };
+                            for i in 0..output_count {
+                                input.write_sample(output_buffer[i]);
+                            }
                         }
                     }
                 };
@@ -625,11 +723,7 @@ async fn spdif_task(
                     prev_count = 0;
                     prev_frame = StereoFrame::ZERO;
                     spdif.reset();
-                    let _ = STATE_CHANNEL.try_send(AppStateUpdate::SignalDetected(false));
-                    let _ = STATE_CHANNEL.try_send(AppStateUpdate::SourceChanged(AudioSource::Usb));
-                    let _ = STATE_CHANNEL.try_send(AppStateUpdate::SampleRateChanged(USB_SAMPLE_RATE));
-                    // Request USB rate when S/PDIF disconnects
-                    PENDING_I2S_RATE.store(USB_SAMPLE_RATE, Ordering::Release);
+                    // Main loop will detect SPDIF_ACTIVE falling edge and handle fallback
                 }
             }
         }
@@ -708,50 +802,21 @@ async fn usb_task(usb: embassy_rp::Peri<'static, USB>) {
     let usb_fut = usb.run();
 
     // Audio data receiver - convert USB audio to I2S and send to output
+    // Source selection is handled by main loop via ACTIVE_SOURCE.
+    // This task always reads packets (to drain USB buffer) but only
+    // writes to the ring buffer when USB is the active source.
     let audio_fut = async {
         let mut buf = [0u8; 640];
-        let mut usb_active = false;
         loop {
             match stream.read_packet(&mut buf).await {
                 Ok(n) => {
-                    if n > 0 {
-                        // Check if S/PDIF is active (has priority)
-                        let spdif_active = SPDIF_ACTIVE.load(Ordering::Acquire);
-
-                        if spdif_active {
-                            // S/PDIF is playing - drop USB audio silently
-                            // Keep reading to prevent USB buffer overflow
-                            if usb_active {
-                                usb_active = false;
-                                defmt::info!("USB audio paused (S/PDIF active)");
-                            }
-                            continue;
-                        }
-
-                        // S/PDIF not active - USB can play
-                        if !usb_active {
-                            usb_active = true;
-                            // Request I2S rate change to USB rate
-                            PENDING_I2S_RATE.store(USB_SAMPLE_RATE, Ordering::Release);
-                            let _ = STATE_CHANNEL.try_send(AppStateUpdate::SourceChanged(
-                                crate::gui::widgets::AudioSource::Usb,
-                            ));
-                            let _ = STATE_CHANNEL.try_send(AppStateUpdate::SignalDetected(true));
-                            let _ = STATE_CHANNEL.try_send(AppStateUpdate::SampleRateChanged(USB_SAMPLE_RATE));
-                            defmt::info!("USB audio stream started");
-                        }
-
+                    if n > 0 && ACTIVE_SOURCE.load(Ordering::Relaxed) == SOURCE_USB {
                         // Convert USB audio (24-bit packed stereo) to ring buffer
-                        // USB format: 3 bytes per sample, little-endian, alternating L/R
-                        // Buffer format: 32-bit signed, MSB-aligned
-                        let samples = n / 6; // 6 bytes per stereo sample (3 bytes * 2 channels)
-
-                        // SAFETY: Single writer (USB task when S/PDIF inactive)
+                        let samples = n / 6;
                         let input = unsafe { &mut AUDIO_INPUT };
 
                         for i in 0..samples {
                             let base = i * 6;
-                            // Extract 24-bit samples (little-endian) and sign-extend to 32-bit
                             let left_24 = (buf[base] as i32)
                                 | ((buf[base + 1] as i32) << 8)
                                 | ((buf[base + 2] as i32) << 16);
@@ -771,21 +836,12 @@ async fn usb_task(usb: embassy_rp::Peri<'static, USB>) {
                                 right_24
                             };
 
-                            // Shift left by 8 to MSB-align 24-bit audio to 32-bit
                             let frame = StereoFrame::new(left << 8, right << 8);
                             input.write_sample(frame);
                         }
                     }
                 }
                 Err(_) => {
-                    if usb_active {
-                        usb_active = false;
-                        // Revert to line-in when USB stops
-                        let _ = STATE_CHANNEL.try_send(AppStateUpdate::SourceChanged(
-                            crate::gui::widgets::AudioSource::LineIn,
-                        ));
-                        defmt::info!("USB audio stream stopped");
-                    }
                     Timer::after(Duration::from_millis(10)).await;
                 }
             }
@@ -837,27 +893,31 @@ async fn usb_task(usb: embassy_rp::Peri<'static, USB>) {
 
 /// Core 1 entry point - dedicated audio processing with clock recovery
 ///
-/// Runs a tight loop that feeds the I2S FIFO from the ring buffer.
-/// No executor overhead - just reads samples and writes to PIO.
-/// The PIO FIFO naturally paces output.
+/// Runs a tight loop that:
+/// 1. Drains I2S RX FIFO (line-in ADC) - always, to prevent overflow
+/// 2. When line-in is active, writes RX data to the ring buffer
+/// 3. Reads from ring buffer and writes to I2S TX
+/// 4. Adaptively adjusts TX clock based on buffer level
 ///
-/// Key features:
-/// - Handles dynamic sample rate changes from Core 0 (PENDING_I2S_RATE)
-/// - Adaptive clock adjustment based on buffer level
+/// I2S RX must be drained on Core 1 (not async Core 0) because the PIO RX FIFO
+/// is only 8 words deep (~4 stereo frames at 96kHz = ~42µs). Async task scheduling
+/// on Core 0 cannot guarantee the timing needed to prevent FIFO overflow.
 fn core1_audio_main() -> ! {
     // Wait for Core 0 to signal that I2S is ready
     while !I2S_READY.load(Ordering::Acquire) {
         asm::nop();
     }
 
-    // Take ownership of I2S from the static
+    // Take ownership of I2S TX and RX from statics
     // SAFETY: Core 0 has finished writing and signaled us
     let mut i2s_tx = unsafe { I2S_TX.take().unwrap() };
+    let mut i2s_rx = unsafe { I2S_RX.take().unwrap() };
 
-    defmt::info!("Core 1: I2S audio loop started");
+    defmt::info!("Core 1: I2S audio loop started (TX + RX)");
 
-    // Start the I2S transmitter
+    // Start both transmitter and receiver
     i2s_tx.start();
+    i2s_rx.start();
 
     // Counter for periodic buffer level check (don't check every sample)
     let mut check_counter: u32 = 0;
@@ -876,7 +936,7 @@ fn core1_audio_main() -> ! {
             if current != pending {
                 defmt::info!("Core 1: Rate change {} -> {} Hz", current, pending);
 
-                // Stop I2S, reconfigure, clear buffer, restart
+                // Stop I2S TX, reconfigure, clear buffer, restart
                 i2s_tx.stop();
                 i2s_tx.set_sample_rate(pending);
                 CURRENT_I2S_RATE.store(pending, Ordering::Release);
@@ -890,18 +950,43 @@ fn core1_audio_main() -> ! {
             }
         }
 
+        // Always drain I2S RX FIFO to prevent overflow/stall
+        let active_source = ACTIVE_SOURCE.load(Ordering::Relaxed);
+
+        if let Some((left, right)) = i2s_rx.try_read() {
+            if active_source == SOURCE_LINEIN {
+                // Line-in is the active source - write to ring buffer
+                // Shift left by 1 to compensate for I2S "don't care" bit:
+                // RX captures [don't_care, MSB, MSB-1, ..., bit1] because the first
+                // sample after WCLK transition is before the PCM1822 drives MSB.
+                // Shifting left moves MSB to bit 31, matching USB format.
+                let input = unsafe { &mut AUDIO_INPUT };
+                let frame = StereoFrame::new((left << 1) as i32, (right << 1) as i32);
+                input.write_sample(frame);
+            }
+            // Otherwise: data is discarded (active source is writing)
+        }
+
         // Periodic adaptive clock adjustment based on buffer level
+        // Skip when line-in is active: RX and TX share the same PIO clock,
+        // so there's no drift to compensate.
         check_counter = check_counter.wrapping_add(1);
         if check_counter >= CHECK_INTERVAL {
             check_counter = 0;
 
-            let available = unsafe { &AUDIO_INPUT }.available();
-            let speed = match available {
-                0..=63 => ClockSpeed::Slow,      // Buffer low, slow down output
-                64..=191 => ClockSpeed::Normal,  // Buffer OK (target ~128)
-                _ => ClockSpeed::Fast,           // Buffer high, speed up output
-            };
-            i2s_tx.adjust_clock(speed);
+            if active_source == SOURCE_LINEIN {
+                // Line-in: keep clock at nominal rate (no drift possible)
+                i2s_tx.adjust_clock(ClockSpeed::Normal);
+            } else {
+                // S/PDIF or USB: adaptive clock for external source drift
+                let available = unsafe { &AUDIO_INPUT }.available();
+                let speed = match available {
+                    0..=63 => ClockSpeed::Slow,      // Buffer low, slow down output
+                    64..=191 => ClockSpeed::Normal,  // Buffer OK (target ~128)
+                    _ => ClockSpeed::Fast,           // Buffer high, speed up output
+                };
+                i2s_tx.adjust_clock(speed);
+            }
         }
 
         // SAFETY: Core 1 is the only consumer of the input buffer

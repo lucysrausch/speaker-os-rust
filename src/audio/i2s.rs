@@ -294,6 +294,8 @@ impl<'d, PIO: Instance, const SM: usize> I2sTx<'d, PIO, SM> {
 /// I2S Receiver (from PCM1822 ADC)
 ///
 /// Generates BCLK and WCLK, receives DATA. Uses a single state machine.
+/// Timing matches I2sTx: 2 sideset bits (BCLK + WCLK), 2 PIO cycles per bit, no delays.
+/// Both TX and RX use the same `calculate_clock_divider()` function.
 /// Pin assignments: BCLK=GPIO23, WCLK=GPIO24, DATA=GPIO25
 pub struct I2sRx<'d, PIO: Instance, const SM: usize> {
     sm: StateMachine<'d, PIO, SM>,
@@ -302,36 +304,45 @@ pub struct I2sRx<'d, PIO: Instance, const SM: usize> {
 impl<'d, PIO: Instance, const SM: usize> I2sRx<'d, PIO, SM> {
     /// Create I2S receiver
     ///
-    /// Does NOT start the state machine - call `start()` or use atomic enable.
+    /// Does NOT start the state machine - call `start()` after creation.
     pub fn new(
         common: &mut Common<'d, PIO>,
         mut sm: StateMachine<'d, PIO, SM>,
         bclk_pin: Peri<'d, impl PioPin>,
         wclk_pin: Peri<'d, impl PioPin>,
         data_pin: Peri<'d, impl PioPin>,
-        clock_divider: U24F8,
+        sample_rate: u32,
     ) -> Self {
+        let clock_divider = calculate_clock_divider(sample_rate);
+
         // PIO program for I2S receive with clock generation
-        // Same timing as TX for phase alignment
-        // Data is sampled on BCLK rising edge
+        // Matches TX timing: 2 sideset bits, 2 PIO cycles per bit, no delays
+        // Side-set: bit 0 = BCLK, bit 1 = WCLK
+        // Data sampled on BCLK rising edge
+        // WCLK transitions on BCLK falling edge (I2S standard)
+        // Uses set x, 30 for loop counter (ISR is used for input data)
+        //
+        // Per I2S spec: WCLK transitions on BCLK falling, MSB valid 1 BCLK later.
+        // The set x instruction (BCLK low) IS the "don't care" BCLK half-cycle.
+        // First in pins after transition samples at BCLK rising = MSB position.
         #[rustfmt::skip]
         let prg = pio::pio_asm!(
-            ".side_set 1",
-            ".wrap_target",
-            // Left channel (WCLK=0): input 32 bits
-            "set pins, 0       side 0",     // WCLK low, BCLK low
-            "set x, 31         side 0",
-            "left_loop:",
-            "nop               side 1 [1]", // BCLK high (sample data here)
-            "in pins, 1        side 0 [1]", // Read data bit, BCLK low
-            "jmp x-- left_loop side 0",
-            // Right channel (WCLK=1): input 32 bits
-            "set pins, 1       side 0",     // WCLK high, BCLK low
-            "set x, 31         side 0",
-            "right_loop:",
-            "nop               side 1 [1]", // BCLK high (sample data here)
-            "in pins, 1        side 0 [1]", // Read data bit, BCLK low
-            "jmp x-- right_loop side 0",
+            ".side_set 2",
+            "                              ;        /--- WCLK",
+            "                              ;        |/-- BCLK",
+            ".wrap_target                  ;        ||",
+            "bitloop_left:",
+            "    in pins, 1       side 0b01",  // Sample data, BCLK high, WCLK=0
+            "    jmp x-- bitloop_left side 0b00", // BCLK low, WCLK=0
+            "    in pins, 1       side 0b01",  // Sample last left bit, BCLK high, WCLK still 0
+            "    set x, 30        side 0b10",  // Reload counter, BCLK low, WCLK→1 (transition!)
+            "",
+            "bitloop_right:",
+            "    in pins, 1       side 0b11",  // Sample data, BCLK high, WCLK=1
+            "    jmp x-- bitloop_right side 0b10", // BCLK low, WCLK=1
+            "    in pins, 1       side 0b11",  // Sample last right bit, BCLK high, WCLK still 1
+            "public entry_point:",
+            "    set x, 30        side 0b00",  // Reload counter, BCLK low, WCLK→0 (transition!)
             ".wrap",
         );
 
@@ -341,9 +352,8 @@ impl<'d, PIO: Instance, const SM: usize> I2sRx<'d, PIO, SM> {
 
         let mut cfg = Config::default();
         let loaded = common.load_program(&prg.program);
-        cfg.use_program(&loaded, &[&bclk]); // Sideset = BCLK
-        cfg.set_set_pins(&[&wclk]);          // SET = WCLK
-        cfg.set_in_pins(&[&data]);           // IN = DATA
+        cfg.use_program(&loaded, &[&bclk, &wclk]); // Sideset = BCLK, WCLK
+        cfg.set_in_pins(&[&data]);                  // IN = DATA
         cfg.shift_in = ShiftConfig {
             auto_fill: true,
             threshold: 32,
@@ -355,6 +365,15 @@ impl<'d, PIO: Instance, const SM: usize> I2sRx<'d, PIO, SM> {
         sm.set_config(&cfg);
         sm.set_pin_dirs(Direction::Out, &[&bclk, &wclk]);
         sm.set_pin_dirs(Direction::In, &[&data]);
+
+        // Jump to entry_point to initialize X
+        let entry_point_offset = 7; // "public entry_point:" is at offset 7
+        let entry_point_addr = loaded.origin + entry_point_offset;
+        unsafe {
+            sm.exec_instr(entry_point_addr as u16);
+        }
+
+        defmt::info!("I2S RX configured: {} Hz", sample_rate);
 
         Self { sm }
     }
@@ -385,9 +404,18 @@ impl<'d, PIO: Instance, const SM: usize> I2sRx<'d, PIO, SM> {
     }
 
     /// Try to read samples (non-blocking)
+    ///
+    /// Returns None if no data available. Once the left sample is consumed,
+    /// busy-waits for the right sample to maintain channel sync (right follows
+    /// left within one BCLK period).
     pub fn try_read(&mut self) -> Option<(u32, u32)> {
         let left = self.sm.rx().try_pull()?;
-        let right = self.sm.rx().try_pull()?;
+        // Left consumed - must get right to maintain sync
+        let right = loop {
+            if let Some(v) = self.sm.rx().try_pull() {
+                break v;
+            }
+        };
         Some((left, right))
     }
 
