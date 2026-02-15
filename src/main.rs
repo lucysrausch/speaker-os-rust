@@ -260,9 +260,11 @@ async fn main(spawner: Spawner) {
     let _ = display.flush_all().await;
 
     defmt::info!("Initializing encoder...");
-    boot_screen.set_progress(80, "Init UI...");
+    boot_screen.set_progress(80, "Loading otters...");
     let _ = boot_screen.draw(&mut display, &app_state);
     let _ = display.flush_all().await;
+
+    Timer::after(Duration::from_millis(500)).await;
 
     // Initialize rotary encoder
     let encoder = RotaryEncoder::new(
@@ -285,7 +287,7 @@ async fn main(spawner: Spawner) {
     let _ = boot_screen.draw(&mut display, &app_state);
     let _ = display.flush_all().await;
 
-    Timer::after(Duration::from_millis(500)).await;
+    Timer::after(Duration::from_millis(200)).await;
 
     // Switch to home screen
     let mut home_screen = HomeScreen::new();
@@ -420,10 +422,10 @@ async fn main(spawner: Spawner) {
             display_dirty = true;
         }
 
-        // --- Level metering (every 50ms = 20fps for smooth bar animation) ---
+        // --- Level metering (every 30ms = 33fps for smooth bar animation) ---
         // Async I2C yields between page writes, so audio tasks aren't starved.
         display_refresh_counter += 1;
-        if display_refresh_counter >= 5 {
+        if display_refresh_counter >= 30 {
             display_refresh_counter = 0;
 
             // Read and reset peak levels from Core 1
@@ -441,8 +443,12 @@ async fn main(spawner: Spawner) {
             peak_hold_left = peak_hold_left.max(level_left);
             peak_hold_right = peak_hold_right.max(level_right);
 
-            peak_hold_left = peak_hold_left.saturating_sub(1);
-            peak_hold_right = peak_hold_right.saturating_sub(1);
+            peak_decay_counter += 1;
+            if peak_decay_counter >= 2 {
+                peak_decay_counter = 0;                
+                peak_hold_left = peak_hold_left.saturating_sub(1);
+                peak_hold_right = peak_hold_right.saturating_sub(1);
+            }
             
             app_state.peak_left = peak_hold_left;
             app_state.peak_right = peak_hold_right;
@@ -450,7 +456,7 @@ async fn main(spawner: Spawner) {
             // Clip detection with hold and flash
             let clipping = raw_left > CLIP_LEVEL || raw_right > CLIP_LEVEL;
             if clipping {
-                clip_hold_counter = 20; // Hold CLIP for ~1s after last clip event
+                clip_hold_counter = 33; // Hold CLIP for ~1s after last clip event
             }
             if clip_hold_counter > 0 {
                 clip_hold_counter -= 1;
@@ -460,6 +466,7 @@ async fn main(spawner: Spawner) {
                     // Flash at ~3Hz (toggle every ~300ms)
                     clip_flash_counter = 0;
                     clip_flash_on = !clip_flash_on;
+                    //display_dirty = true;
                 }
                 app_state.clip_flash = clip_flash_on;
             } else {
@@ -505,7 +512,7 @@ async fn main(spawner: Spawner) {
         let _ = display.flush_one_page().await;
 
         // Small yield to prevent busy-looping
-        Timer::after(Duration::from_millis(10)).await;
+        Timer::after(Duration::from_millis(1)).await;
     }
 }
 

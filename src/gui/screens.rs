@@ -349,15 +349,23 @@ impl BootScreen {
 
         Text::with_alignment(
             "OtterAmp",
-            Point::new(64, 24),
+            Point::new(64, 12),
             title_style(),
             Alignment::Center,
         )
         .draw(display)?;
 
         Text::with_alignment(
-            "DSP Speaker",
-            Point::new(64, 38),
+            "Active Speaker System",
+            Point::new(64, 24),
+            text_style(),
+            Alignment::Center,
+        )
+        .draw(display)?;
+
+    Text::with_alignment(
+            "by Faited & Lucia",
+            Point::new(64, 34),
             text_style(),
             Alignment::Center,
         )
