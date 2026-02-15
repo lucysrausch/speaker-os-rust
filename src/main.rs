@@ -49,9 +49,8 @@ bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => embassy_rp::usb::InterruptHandler<embassy_rp::peripherals::USB>;
 });
 
-use sh1106::{prelude::*, Builder};
-
 use crate::drivers::{RotaryEncoder, Tas5830};
+use crate::gui::display::Sh1106;
 use crate::gui::screens::{AppState, HomeScreen, BootScreen};
 use crate::gui::widgets::AudioSource;
 use crate::hw::pins::i2c_addr;
@@ -108,6 +107,16 @@ static PENDING_I2S_RATE: AtomicU32 = AtomicU32::new(0);
 /// Core 1 writes after rate change, Core 0 reads for DSP coefficient selection
 static CURRENT_I2S_RATE: AtomicU32 = AtomicU32::new(96_000);
 
+/// Peak audio levels (absolute value, updated by Core 1, read/reset by Core 0)
+/// Core 1 uses fetch_max per sample; Core 0 uses swap(0) to read and reset atomically.
+static PEAK_LEFT: AtomicU32 = AtomicU32::new(0);
+static PEAK_RIGHT: AtomicU32 = AtomicU32::new(0);
+
+/// Clip threshold: peaks above this level trigger the CLIP warning.
+/// Expressed as a fraction of i32::MAX. 99 = >99% of full range.
+const CLIP_THRESHOLD_PERCENT: u64 = 99;
+const CLIP_LEVEL: u32 = (i32::MAX as u64 * CLIP_THRESHOLD_PERCENT / 100) as u32;
+
 /// S/PDIF FIFO buffer (static allocation)
 static SPDIF_FIFO: StaticCell<[u32; SPDIF_RX_FIFO_SIZE]> = StaticCell::new();
 
@@ -159,32 +168,26 @@ async fn main(spawner: Spawner) {
 
     defmt::info!("Initializing OLED display...");
 
-    // Initialize SH1106 OLED (1.3" display) with address from pins.rs
-    let mut display: GraphicsMode<_> = Builder::new()
-        .with_i2c_addr(i2c_addr::SH1106)
-        .with_size(DisplaySize::Display128x64)
-        .with_rotation(DisplayRotation::Rotate180)
-        .connect_i2c(i2c0)
-        .into();
-
-    if let Err(e) = display.init() {
+    // Initialize SH1106 OLED (1.3" display) with custom driver for partial page flush
+    let mut display = Sh1106::new(i2c0, i2c_addr::SH1106);
+    if let Err(e) = display.init().await {
         defmt::error!("Failed to init display: {:?}", defmt::Debug2Format(&e));
     }
 
     // Clear display (removes random garbage on power-up)
-    display.clear();
-    let _ = display.flush();
+    display.clear_all(embedded_graphics::pixelcolor::BinaryColor::Off);
+    let _ = display.flush_all().await;
 
     // Show boot screen
     let mut boot_screen = BootScreen::new();
     let app_state = AppState::default();
     let _ = boot_screen.draw(&mut display, &app_state);
-    let _ = display.flush();
+    let _ = display.flush_all().await;
 
     defmt::info!("Initializing TAS5830 amplifier...");
     boot_screen.set_progress(20, "Init amp...");
     let _ = boot_screen.draw(&mut display, &app_state);
-    let _ = display.flush();
+    let _ = display.flush_all().await;
 
     // Initialize TAS5830
     let mut amp = Tas5830::new_default(i2c1);
@@ -196,7 +199,7 @@ async fn main(spawner: Spawner) {
     defmt::info!("Initializing I2S output...");
     boot_screen.set_progress(40, "Init I2S...");
     let _ = boot_screen.draw(&mut display, &app_state);
-    let _ = display.flush();
+    let _ = display.flush_all().await;
 
     let mut pio1 = Pio::new(p.PIO1, Irqs);
 
@@ -242,7 +245,7 @@ async fn main(spawner: Spawner) {
     defmt::info!("Initializing S/PDIF input...");
     boot_screen.set_progress(50, "Init SPDIF...");
     let _ = boot_screen.draw(&mut display, &app_state);
-    let _ = display.flush();
+    let _ = display.flush_all().await;
 
     let pio0 = Pio::new(p.PIO0, Irqs);
 
@@ -254,12 +257,12 @@ async fn main(spawner: Spawner) {
 
     boot_screen.set_progress(60, "Audio ready");
     let _ = boot_screen.draw(&mut display, &app_state);
-    let _ = display.flush();
+    let _ = display.flush_all().await;
 
     defmt::info!("Initializing encoder...");
     boot_screen.set_progress(80, "Init UI...");
     let _ = boot_screen.draw(&mut display, &app_state);
-    let _ = display.flush();
+    let _ = display.flush_all().await;
 
     // Initialize rotary encoder
     let encoder = RotaryEncoder::new(
@@ -269,7 +272,7 @@ async fn main(spawner: Spawner) {
     );
 
     // Spawn the encoder task
-    spawner.spawn(encoder_task(encoder)).unwrap();
+    //spawner.spawn(encoder_task(encoder)).unwrap();
 
     // Spawn the USB task
     spawner.spawn(usb_task(p.USB)).unwrap();
@@ -280,7 +283,7 @@ async fn main(spawner: Spawner) {
     defmt::info!("Boot complete!");
     boot_screen.set_progress(100, "Ready!");
     let _ = boot_screen.draw(&mut display, &app_state);
-    let _ = display.flush();
+    let _ = display.flush_all().await;
 
     Timer::after(Duration::from_millis(500)).await;
 
@@ -291,7 +294,7 @@ async fn main(spawner: Spawner) {
     app_state.signal_present = true;
 
     let _ = home_screen.draw(&mut display, &app_state);
-    let _ = display.flush();
+    let _ = display.flush_all().await;
 
     led.set_low();
 
@@ -301,13 +304,24 @@ async fn main(spawner: Spawner) {
     let mut prev_spdif_active = false;
     let mut prev_vbus_present = usb_vbus.is_high();
 
+    // Level metering state
+    let mut peak_hold_left: u8 = 0;
+    let mut peak_hold_right: u8 = 0;
+    let mut peak_decay_counter: u8 = 0;
+    let mut clip_hold_counter: u8 = 0;
+    let mut clip_flash_counter: u8 = 0;
+    let mut clip_flash_on = false;
+    let mut display_refresh_counter: u8 = 0;
+    let mut display_dirty = true; // Track whether display needs redraw
+    let mut prev_clip_flash = false;
+
     // If USB is already connected at boot, start with USB
     if prev_vbus_present {
         ACTIVE_SOURCE.store(SOURCE_USB, Ordering::Release);
         app_state.source = AudioSource::Usb;
         PENDING_I2S_RATE.store(USB_SAMPLE_RATE, Ordering::Release);
         let _ = home_screen.draw(&mut display, &app_state);
-        let _ = display.flush();
+        let _ = display.flush_all().await;
         defmt::info!("USB connected at boot");
     }
 
@@ -374,8 +388,7 @@ async fn main(spawner: Spawner) {
         prev_vbus_present = vbus_present;
 
         if source_changed {
-            let _ = home_screen.draw(&mut display, &app_state);
-            let _ = display.flush();
+            display_dirty = true;
         }
 
         // --- Handle state updates from tasks ---
@@ -401,10 +414,71 @@ async fn main(spawner: Spawner) {
                 // SourceChanged and SignalDetected now handled by source arbitration above
                 _ => {}
             }
+            display_dirty = true;
+        }
 
-            // Refresh display
+        // --- Level metering (every 50ms = 20fps for smooth bar animation) ---
+        // Async I2C yields between page writes, so audio tasks aren't starved.
+        display_refresh_counter += 1;
+        if display_refresh_counter >= 5 {
+            display_refresh_counter = 0;
+
+            // Read and reset peak levels from Core 1
+            let raw_left = PEAK_LEFT.swap(0, Ordering::Relaxed);
+            let raw_right = PEAK_RIGHT.swap(0, Ordering::Relaxed);
+
+            // Convert to 0-100 percentage
+            let level_left = ((raw_left as u64 * 100) / i32::MAX as u64).min(100) as u8;
+            let level_right = ((raw_right as u64 * 100) / i32::MAX as u64).min(100) as u8;
+
+            app_state.level_left = level_left;
+            app_state.level_right = level_right;
+
+            // Peak hold with slow decay
+            peak_hold_left = peak_hold_left.max(level_left);
+            peak_hold_right = peak_hold_right.max(level_right);
+            //peak_decay_counter += 1;
+            //if peak_decay_counter >= 4 {
+                // Decay 1 unit every 500ms
+                //peak_decay_counter = 0;
+                peak_hold_left = peak_hold_left.saturating_sub(1);
+                peak_hold_right = peak_hold_right.saturating_sub(1);
+            //}
+            app_state.peak_left = peak_hold_left;
+            app_state.peak_right = peak_hold_right;
+
+            // Clip detection with hold and flash
+            let clipping = raw_left > CLIP_LEVEL || raw_right > CLIP_LEVEL;
+            if clipping {
+                clip_hold_counter = 20; // Hold CLIP for ~1s after last clip event
+            }
+            if clip_hold_counter > 0 {
+                clip_hold_counter -= 1;
+                app_state.clipping = true;
+                clip_flash_counter += 1;
+                if clip_flash_counter >= 6 {
+                    // Flash at ~3Hz (toggle every ~300ms)
+                    clip_flash_counter = 0;
+                    clip_flash_on = !clip_flash_on;
+                }
+                app_state.clip_flash = clip_flash_on;
+            } else {
+                app_state.clipping = false;
+                app_state.clip_flash = false;
+                clip_flash_on = false;
+                clip_flash_counter = 0;
+            }
+
+            // Partial update: meters + volume/clip area, flush dirty pages
+            let _ = home_screen.draw_meters(&mut display, &app_state);
+            let _ = display.flush().await;
+        }
+
+        // Full redraw for UI text/state changes (source, volume, mute, sample rate)
+        if display_dirty {
+            display_dirty = false;
             let _ = home_screen.draw(&mut display, &app_state);
-            let _ = display.flush();
+            let _ = display.flush_all().await;
         }
 
         // Small yield to prevent busy-looping
@@ -993,6 +1067,12 @@ fn core1_audio_main() -> ! {
         let input = unsafe { &mut AUDIO_INPUT };
 
         if let Some(frame) = input.read_sample() {
+            // Track peak levels for metering (absolute value, pre-EQ)
+            let abs_l = (frame.left as i64).unsigned_abs() as u32;
+            let abs_r = (frame.right as i64).unsigned_abs() as u32;
+            PEAK_LEFT.fetch_max(abs_l, Ordering::Relaxed);
+            PEAK_RIGHT.fetch_max(abs_r, Ordering::Relaxed);
+
             // Audio data available - output it
             // write() blocks until FIFO has space, naturally pacing output
             i2s_tx.write(frame.left as u32, frame.right as u32);

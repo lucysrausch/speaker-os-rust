@@ -2,6 +2,7 @@
 //!
 //! Provides widgets and screens for the OLED display menu system.
 
+pub mod display;
 pub mod widgets;
 pub mod screens;
 pub mod menu;

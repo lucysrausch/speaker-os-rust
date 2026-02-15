@@ -35,6 +35,8 @@ pub struct RotaryEncoder<'d> {
     last_b: bool,
     last_event_time: Instant,
     btn_press_time: Option<Instant>,
+    last_btn_state: bool,
+    btn_debounce_time: Instant,
 }
 
 impl<'d> RotaryEncoder<'d> {
@@ -53,6 +55,8 @@ impl<'d> RotaryEncoder<'d> {
         let last_a = pin_a.is_high();
         let last_b = pin_b.is_high();
 
+        let last_btn_state = pin_btn.is_low();
+
         Self {
             pin_a,
             pin_b,
@@ -61,6 +65,8 @@ impl<'d> RotaryEncoder<'d> {
             last_b,
             last_event_time: Instant::now(),
             btn_press_time: None,
+            last_btn_state,
+            btn_debounce_time: Instant::now(),
         }
     }
 
@@ -71,13 +77,21 @@ impl<'d> RotaryEncoder<'d> {
     pub fn poll(&mut self) -> Option<EncoderEvent> {
         let now = Instant::now();
 
-        // Check button state
-        let btn_pressed = self.pin_btn.is_low(); // Active low with pull-up
+        // Check button state with debounce (20ms)
+        let btn_raw = self.pin_btn.is_low(); // Active low with pull-up
 
-        if let Some(press_time) = self.btn_press_time {
-            if !btn_pressed {
-                // Button released
-                self.btn_press_time = None;
+        if btn_raw != self.last_btn_state
+            && now - self.btn_debounce_time > Duration::from_millis(20)
+        {
+            self.last_btn_state = btn_raw;
+            self.btn_debounce_time = now;
+
+            if btn_raw {
+                // Button just pressed
+                self.btn_press_time = Some(now);
+                return Some(EncoderEvent::Press);
+            } else if let Some(press_time) = self.btn_press_time.take() {
+                // Button just released
                 let held_duration = now - press_time;
                 if held_duration > Duration::from_millis(500) {
                     return Some(EncoderEvent::LongPress);
@@ -85,9 +99,6 @@ impl<'d> RotaryEncoder<'d> {
                     return Some(EncoderEvent::Release);
                 }
             }
-        } else if btn_pressed {
-            self.btn_press_time = Some(now);
-            return Some(EncoderEvent::Press);
         }
 
         // Debounce check for rotation

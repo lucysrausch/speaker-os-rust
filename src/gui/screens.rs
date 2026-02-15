@@ -8,9 +8,10 @@ use embedded_graphics::{
 
 use super::{
     clear_display, title_style, text_style,
-    widgets::{AudioSource, LargeVolumeDisplay, StatusBar, VolumeBar},
+    display::Sh1106,
+    widgets::{AudioSource, ClipWarning, LargeVolumeDisplay, LevelMeter, StatusBar, VolumeBar},
     menu::{Menu, MenuAction, create_main_menu, create_source_menu},
-    DISPLAY_HEIGHT,
+    DISPLAY_HEIGHT, DISPLAY_WIDTH,
 };
 
 /// Screen identifiers
@@ -42,6 +43,16 @@ pub struct AppState {
     pub signal_present: bool,
     pub sample_rate: u32,
     pub eq_enabled: bool,
+    /// Level meter: current bar level (0-100)
+    pub level_left: u8,
+    pub level_right: u8,
+    /// Level meter: peak hold position (0-100)
+    pub peak_left: u8,
+    pub peak_right: u8,
+    /// Clip warning active
+    pub clipping: bool,
+    /// Clip flash toggle (alternates for flashing effect)
+    pub clip_flash: bool,
 }
 
 impl Default for AppState {
@@ -54,6 +65,12 @@ impl Default for AppState {
             signal_present: false,
             sample_rate: 96000,
             eq_enabled: false,
+            level_left: 0,
+            level_right: 0,
+            peak_left: 0,
+            peak_right: 0,
+            clipping: false,
+            clip_flash: false,
         }
     }
 }
@@ -91,13 +108,24 @@ impl HomeScreen {
     {
         clear_display(display)?;
 
-        // Status bar at top
+        // Status bar at top (y=0-13)
         let status = StatusBar::new(state.source, state.sample_rate, state.signal_present);
         status.draw(display)?;
 
-        // Large volume display in center
-        let vol_display = LargeVolumeDisplay::new(state.volume, state.muted);
-        vol_display.draw(display)?;
+        // Level meters (y=15, takes ~14px)
+        let meter = LevelMeter::new(
+            state.level_left, state.level_right,
+            state.peak_left, state.peak_right,
+        );
+        meter.draw(display, 15)?;
+
+        // Volume display or CLIP warning (centered around y=44)
+        if state.clipping && state.clip_flash {
+            ClipWarning::draw(display, 43);
+        } else {
+            let vol_display = LargeVolumeDisplay::new(state.volume, state.muted);
+            vol_display.draw_at(display, 48)?;
+        }
 
         // Menu hint at bottom
         if self.show_menu_hint {
@@ -108,6 +136,37 @@ impl HomeScreen {
                 Alignment::Center,
             )
             .draw(display)?;
+        }
+
+        Ok(())
+    }
+
+    /// Draw only the level meters and clip/volume area (partial update).
+    ///
+    /// Clears and redraws just the bar interiors and volume/clip region,
+    /// then the caller flushes only dirty pages via async I2C.
+    pub fn draw_meters<I2C: embedded_hal_async::i2c::I2c>(
+        &self,
+        display: &mut Sh1106<I2C>,
+        state: &AppState,
+    ) -> Result<(), core::convert::Infallible> {
+        // Clear meter bar area (y=15..29)
+        display.clear_region(0, 15, DISPLAY_WIDTH, 14);
+
+        // Redraw meter bars
+        let meter = LevelMeter::new(
+            state.level_left, state.level_right,
+            state.peak_left, state.peak_right,
+        );
+        meter.draw(display, 15)?;
+
+        // Clear and redraw the volume/clip area (y=30..56)
+        display.clear_region(0, 30, DISPLAY_WIDTH, 26);
+        if state.clipping && state.clip_flash {
+            ClipWarning::draw(display, 43)?;
+        } else {
+            let vol_display = LargeVolumeDisplay::new(state.volume, state.muted);
+            vol_display.draw_at(display, 48)?;
         }
 
         Ok(())
