@@ -38,6 +38,7 @@ fixed = "1.28"
 
 # PIO for I2S and S/PDIF (updated for embassy-rp 0.9)
 pio = "0.3"
+micromath = "2.1.0"
 
 [features]
 default = []

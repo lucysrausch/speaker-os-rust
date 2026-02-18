@@ -8,8 +8,9 @@
 //!   1. `init()` — PDN high, reset into Hi-Z (before I2S clocks)
 //!   2. `play()` — DSP coefficients + enter Play (after I2S clocks running)
 
-use embedded_hal_async::i2c::I2c;
 use embassy_rp::gpio::{Level, Output};
+use embedded_hal_async::i2c::I2c;
+use micromath::F32Ext;
 
 /// TAS5830 I2C address (configured by ADDR pin)
 pub const DEFAULT_ADDRESS: u8 = 0x60;
@@ -34,6 +35,7 @@ pub mod reg {
 // ---------------------------------------------------------------------------
 
 /// Phase 1: Reset + enter Hi-Z. Run BEFORE I2S clocks start.
+#[rustfmt::skip]
 const INIT_SEQUENCE_1: &[(u8, u8)] = &[
     // Reset sequence
     (0x00, 0x00), // Page 0
@@ -50,6 +52,7 @@ const INIT_SEQUENCE_1: &[(u8, u8)] = &[
 ];
 
 /// Phase 2: DSP config + coefficients + enter Play. Run AFTER I2S clocks running.
+#[rustfmt::skip]
 const INIT_SEQUENCE_2: &[(u8, u8)] = &[
     (0x00, 0x00),
     (0x7f, 0x00),
@@ -531,17 +534,30 @@ where
         if !self.muted {
             self.write_reg(reg::DIG_VOL, volume).await?;
         }
-        defmt::debug!("TAS5830 volume: {:#04x} ({} dB)", volume, -(volume as i16) / 2);
+        defmt::debug!(
+            "TAS5830 volume: {:#04x} ({} dB)",
+            volume,
+            -(volume as i16) / 2
+        );
         Ok(())
     }
 
-    /// Set volume in percentage (0-100)
     pub async fn set_volume_percent(&mut self, percent: u8) -> Result<(), Error<E>> {
+        const VOL_START: f32 = 0.5;
+        const VOL_SCALE: f32 = 30.0;
+        const VOL_RANGE: f32 = VOL_START + VOL_SCALE;
+        let vol_scaled = ((percent as f32) / 100.0 * VOL_SCALE).clamp(0.001, VOL_SCALE) + VOL_START;
+        let percent_scaled = (vol_scaled.log2() / VOL_RANGE.log2() * 100.0).clamp(0.0, 100.0) as u8;
+        defmt::info!(
+            "TAS5830 set volume percent: {} scaled: {}",
+            percent,
+            percent_scaled
+        );
         // Map 0-100% to 0xCF-0x00 (mute to 0dB)
-        let volume = if percent >= 100 {
+        let volume = if percent_scaled >= 100 {
             0x00
         } else {
-            0xCF - ((percent as u16 * 0xCF) / 100) as u8
+            0xCF - ((percent_scaled as u16 * 0xCF) / 100) as u8
         };
         self.set_volume(volume).await
     }
