@@ -189,8 +189,10 @@ async fn main(spawner: Spawner) {
     let _ = boot_screen.draw(&mut display, &app_state);
     let _ = display.flush_all().await;
 
-    // Initialize TAS5830
-    let mut amp = Tas5830::new_default(i2c1);
+    // Initialize TAS5830 (manages PDN and MUTE pins internally)
+    let amp_pdn = Output::new(p.PIN_17, Level::Low);
+    let amp_mute = Output::new(p.PIN_18, Level::Low);
+    let mut amp = Tas5830::new_default(i2c1, amp_pdn, amp_mute);
     if let Err(e) = amp.init().await {
         defmt::error!("Failed to init TAS5830: {:?}", e);
     }
@@ -211,6 +213,11 @@ async fn main(spawner: Spawner) {
         p.PIN_21, // AMP_DATA
         I2S_SAMPLE_RATE,
     );
+
+    // I2S clocks are now running — transition TAS5830 to PLAY and unmute
+    if let Err(e) = amp.play().await {
+        defmt::error!("Failed to start TAS5830 playback: {:?}", e);
+    }
 
     // Initialize I2S receiver for line-in ADC (PIO1 SM1)
     let i2s_rx = I2sRx::new(
@@ -268,13 +275,13 @@ async fn main(spawner: Spawner) {
 
     // Initialize rotary encoder
     let encoder = RotaryEncoder::new(
-        p.PIN_9,  // ENC_A
-        p.PIN_10, // ENC_B
+        p.PIN_10,  // ENC_A
+        p.PIN_9, // ENC_B
         p.PIN_8,  // ENC_BTN
     );
 
     // Spawn the encoder task
-    //spawner.spawn(encoder_task(encoder)).unwrap();
+    spawner.spawn(encoder_task(encoder)).unwrap();
 
     // Spawn the USB task
     spawner.spawn(usb_task(p.USB)).unwrap();
