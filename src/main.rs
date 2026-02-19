@@ -127,6 +127,20 @@ static INITIAL_MUTED: AtomicBool = AtomicBool::new(false);
 const CLIP_THRESHOLD_PERCENT: u64 = 99;
 const CLIP_LEVEL: u32 = (i32::MAX as u64 * CLIP_THRESHOLD_PERCENT / 100) as u32;
 
+/// Convert a raw audio peak (0..i32::MAX) to a 0-100 meter level using log2.
+/// ~48dB range: 0 dBFS → 100%, −48 dBFS → 0%, silence → 0%.
+fn log_meter(raw: u32) -> u8 {
+    use micromath::F32Ext;
+    if raw == 0 {
+        return 0;
+    }
+    const LOG2_MAX: f32 = 31.0; // log2(i32::MAX)
+    const RANGE_BITS: f32 = 8.0; // floor at −48 dBFS
+    const LOG2_FLOOR: f32 = LOG2_MAX - RANGE_BITS;
+    let log_val = (raw as f32).log2();
+    ((log_val - LOG2_FLOOR) / RANGE_BITS * 100.0).clamp(0.0, 100.0) as u8
+}
+
 /// S/PDIF FIFO buffer (static allocation)
 static SPDIF_FIFO: StaticCell<[u32; SPDIF_RX_FIFO_SIZE]> = StaticCell::new();
 
@@ -151,6 +165,12 @@ async fn main(spawner: Spawner) {
     defmt::info!("OtterAmp DSP starting...");
 
     let p = embassy_rp::init(Default::default());
+
+    // Drive TAS5830 PDN low immediately to ensure clean reset on reflash.
+    // Without this, the pin floats high during boot and the amp may be in
+    // an unknown state by the time init() runs.
+    let amp_pdn = Output::new(p.PIN_17, Level::Low);
+    let amp_mute = Output::new(p.PIN_18, Level::Low);
 
     // Load saved settings from flash
     let mut flash = Flash::<_, Blocking, { settings::FLASH_SIZE }>::new_blocking(p.FLASH);
@@ -206,8 +226,6 @@ async fn main(spawner: Spawner) {
     let _ = display.flush_all().await;
 
     // Initialize TAS5830 (manages PDN and MUTE pins internally)
-    let amp_pdn = Output::new(p.PIN_17, Level::Low);
-    let amp_mute = Output::new(p.PIN_18, Level::Low);
     let mut amp = Tas5830::new_default(i2c1, amp_pdn, amp_mute);
     if let Err(e) = amp.init().await {
         defmt::error!("Failed to init TAS5830: {:?}", e);
@@ -478,9 +496,11 @@ async fn main(spawner: Spawner) {
             let raw_left = PEAK_LEFT.swap(0, Ordering::Relaxed);
             let raw_right = PEAK_RIGHT.swap(0, Ordering::Relaxed);
 
-            // Convert to 0-100 percentage
-            let level_left = ((raw_left as u64 * 100) / i32::MAX as u64).min(100) as u8;
-            let level_right = ((raw_right as u64 * 100) / i32::MAX as u64).min(100) as u8;
+            // Convert raw peaks to 0-100 using log2 for dB-like meter response.
+            // Uses full 32-bit raw values for smooth low-end resolution.
+            // 60dB range: log2(i32::MAX)≈31, minus 20 bits ≈ 60dB (6dB/bit).
+            let level_left = log_meter(raw_left);
+            let level_right = log_meter(raw_right);
 
             app_state.level_left = level_left;
             app_state.level_right = level_right;
