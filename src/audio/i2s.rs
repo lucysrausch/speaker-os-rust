@@ -135,8 +135,8 @@ impl<'d, PIO: Instance, const SM: usize> I2sTx<'d, PIO, SM> {
         let program_origin = loaded.origin;
 
         cfg.use_program(&loaded, &[&bclk, &wclk]); // Sideset = BCLK, WCLK
-        cfg.set_out_pins(&[&data]);                 // OUT = DATA
-        cfg.set_set_pins(&[&data]);                 // SET = DATA (for initialization)
+        cfg.set_out_pins(&[&data]); // OUT = DATA
+        cfg.set_set_pins(&[&data]); // SET = DATA (for initialization)
         cfg.shift_out = ShiftConfig {
             auto_fill: true,
             threshold: 32,
@@ -353,7 +353,7 @@ impl<'d, PIO: Instance, const SM: usize> I2sRx<'d, PIO, SM> {
         let mut cfg = Config::default();
         let loaded = common.load_program(&prg.program);
         cfg.use_program(&loaded, &[&bclk, &wclk]); // Sideset = BCLK, WCLK
-        cfg.set_in_pins(&[&data]);                  // IN = DATA
+        cfg.set_in_pins(&[&data]); // IN = DATA
         cfg.shift_in = ShiftConfig {
             auto_fill: true,
             threshold: 32,

@@ -1,6 +1,7 @@
 //! Device drivers for OtterAmp DSP peripherals
 
 pub mod encoder;
+pub mod settings;
 pub mod tas5830;
 
 pub use encoder::RotaryEncoder;

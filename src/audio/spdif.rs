@@ -182,33 +182,33 @@ mod pio_decode_48000 {
             "    wait 0 pin 0",
             ".wrap_target",
             "wait1:",
-            "    wait 1 pin 0 [cy-1+lp]",    // wait for 0->1
+            "    wait 1 pin 0 [cy-1+lp]", // wait for 0->1
             "symbol_1x:",
-            "    jmp pin symbol_11x",         // if 11 -> symbol_11x
-            "    in osr, 1",                  // emit 1 (symbol 10)
+            "    jmp pin symbol_11x", // if 11 -> symbol_11x
+            "    in osr, 1",          // emit 1 (symbol 10)
             "    jmp wait1",
             "symbol_11x:",
             "    nop [cy-2]",
-            "    jmp pin sync1110",           // if 111 -> sync
-            "    in null, 1",                 // emit 0 (symbol 110)
+            "    jmp pin sync1110", // if 111 -> sync
+            "    in null, 1",       // emit 0 (symbol 110)
             "    jmp symbol_0x [cy-3]",
             "wait0:",
-            "    wait 0 pin 0 [cy-1+lp]",    // wait for 1->0
+            "    wait 0 pin 0 [cy-1+lp]", // wait for 1->0
             "symbol_0x:",
-            "    jmp pin symbol_01",          // if 01 -> symbol_01
-            "    in null, 1",                 // emit 0 (symbol 00)
+            "    jmp pin symbol_01", // if 01 -> symbol_01
+            "    in null, 1",        // emit 0 (symbol 00)
             ".wrap",
             "symbol_01:",
-            "    in osr, 1",                  // emit 1
+            "    in osr, 1", // emit 1
             "    jmp wait0",
             "sync1110:",
-            "    push block",                 // 32-bit boundary
-            "    in osr, 2",                  // emit sync (1110)
+            "    push block", // 32-bit boundary
+            "    in osr, 2",  // emit sync (1110)
             "    wait 0 pin 0 [cy-1+lp]",
             "    jmp pin sync1xxx [cy-2]",
             "    jmp symbol_0x",
             "sync1xxx:",
-            "    in osr, 2",                  // emit sync (1000)
+            "    in osr, 2", // emit sync (1000)
             "    jmp entry_point",
         );
         program.program
@@ -319,7 +319,11 @@ const SYNC_LOST_THRESHOLD: u32 = 10; // ~100ms with 10ms DMA timeout
 unsafe fn write_pio_instr(pio_num: u8, addr: u8, instr: u16) {
     // PIO0 base: 0x50200000, PIO1 base: 0x50300000
     // INSTR_MEM offset: 0x048
-    let pio_base = if pio_num == 0 { 0x5020_0000u32 } else { 0x5030_0000u32 };
+    let pio_base = if pio_num == 0 {
+        0x5020_0000u32
+    } else {
+        0x5030_0000u32
+    };
     let instr_mem_addr = (pio_base + PIO_INSTR_MEM_OFFSET as u32) as *mut u32;
     // SAFETY: addr is within PIO instruction memory bounds (0-31)
     // and the caller ensures the state machine is disabled
@@ -450,8 +454,11 @@ impl<'d, PIO: Instance, const SM: usize, DMA: Channel> SpdifRx<'d, PIO, SM, DMA>
 
         // Load capture program only if not already loaded
         let origin = if let Some((origin, wrap_top, wrap_bottom)) = self.capture_info {
-            trace!("detect_signal: reusing capture at origin {}, decode_info={}",
-                origin, self.decode_info.is_some());
+            trace!(
+                "detect_signal: reusing capture at origin {}, decode_info={}",
+                origin,
+                self.decode_info.is_some()
+            );
             // Manually configure wrap points
             let mut exec = cfg.get_exec();
             exec.wrap_top = wrap_top;
@@ -464,7 +471,11 @@ impl<'d, PIO: Instance, const SM: usize, DMA: Channel> SpdifRx<'d, PIO, SM, DMA>
             let prg = pio_capture::program();
             let installed = common.load_program(&prg);
             let origin = installed.origin;
-            trace!("detect_signal: capture loaded at origin {}, size {}", origin, prg.code.len());
+            trace!(
+                "detect_signal: capture loaded at origin {}, size {}",
+                origin,
+                prg.code.len()
+            );
             let wrap_top = origin + installed.wrap.source;
             let wrap_bottom = origin + installed.wrap.target;
             self.capture_info = Some((origin, wrap_top, wrap_bottom));
@@ -500,7 +511,9 @@ impl<'d, PIO: Instance, const SM: usize, DMA: Channel> SpdifRx<'d, PIO, SM, DMA>
         let mut capture_buf = [0u32; CAPTURE_SIZE];
         let capture_result = embassy_time::with_timeout(
             Duration::from_millis(500),
-            self.sm.rx().dma_pull(self.dma.reborrow(), &mut capture_buf, false),
+            self.sm
+                .rx()
+                .dma_pull(self.dma.reborrow(), &mut capture_buf, false),
         )
         .await;
         trace!("detect_signal: DMA done, result={}", capture_result.is_ok());
@@ -603,11 +616,17 @@ impl<'d, PIO: Instance, const SM: usize, DMA: Channel> SpdifRx<'d, PIO, SM, DMA>
         let mut cfg = Config::default();
 
         // Check if we can reuse the already-loaded decode program
-        let origin = if let Some((origin, _wrap_top, _wrap_bottom, loaded_variant)) = self.decode_info {
+        let origin = if let Some((origin, _wrap_top, _wrap_bottom, loaded_variant)) =
+            self.decode_info
+        {
             if loaded_variant != decode_variant {
                 // Different variant needed - patch the program in place
-                trace!("start_decode: patching decode program from {} to {} at origin {}",
-                    loaded_variant.as_hz(), decode_variant.as_hz(), origin);
+                trace!(
+                    "start_decode: patching decode program from {} to {} at origin {}",
+                    loaded_variant.as_hz(),
+                    decode_variant.as_hz(),
+                    origin
+                );
 
                 // Get the new program's instructions
                 let prg = get_decode_program(decode_variant);
@@ -642,12 +661,18 @@ impl<'d, PIO: Instance, const SM: usize, DMA: Channel> SpdifRx<'d, PIO, SM, DMA>
                 exec.wrap_bottom = new_wrap_bottom;
                 unsafe { cfg.set_exec(exec) };
 
-                trace!("start_decode: decode program patched successfully (wrap {}-{})",
-                    new_wrap_bottom, new_wrap_top);
+                trace!(
+                    "start_decode: decode program patched successfully (wrap {}-{})",
+                    new_wrap_bottom,
+                    new_wrap_top
+                );
             } else {
                 // Same variant - still rewrite program to PIO memory
                 // The capture program may have corrupted PIO state
-                trace!("start_decode: rewriting decode program at origin {}", origin);
+                trace!(
+                    "start_decode: rewriting decode program at origin {}",
+                    origin
+                );
                 let prg = get_decode_program(decode_variant);
                 let wrap_source = prg.wrap.source;
                 let wrap_target = prg.wrap.target;
@@ -680,7 +705,10 @@ impl<'d, PIO: Instance, const SM: usize, DMA: Channel> SpdifRx<'d, PIO, SM, DMA>
             origin
         } else {
             // First time loading decode program
-            trace!("start_decode: loading decode program for {} Hz", decode_variant.as_hz());
+            trace!(
+                "start_decode: loading decode program for {} Hz",
+                decode_variant.as_hz()
+            );
             let prg = match decode_variant {
                 SampleFreq::Hz48000 => pio_decode_48000::program(),
                 SampleFreq::Hz96000 => pio_decode_96000::program(),
@@ -689,8 +717,12 @@ impl<'d, PIO: Instance, const SM: usize, DMA: Channel> SpdifRx<'d, PIO, SM, DMA>
             };
             let installed = common.load_program(&prg);
             let origin = installed.origin;
-            trace!("start_decode: decode loaded at origin {}, size {}, capture_info={:?}",
-                origin, prg.code.len(), self.capture_info);
+            trace!(
+                "start_decode: decode loaded at origin {}, size {}, capture_info={:?}",
+                origin,
+                prg.code.len(),
+                self.capture_info
+            );
             let wrap_top = origin + installed.wrap.source;
             let wrap_bottom = origin + installed.wrap.target;
             self.decode_info = Some((origin, wrap_top, wrap_bottom, decode_variant));
@@ -729,7 +761,7 @@ impl<'d, PIO: Instance, const SM: usize, DMA: Channel> SpdifRx<'d, PIO, SM, DMA>
         unsafe {
             self.sm.exec_instr(0xe020); // set x, 0
             self.sm.exec_instr(0xa0e9); // mov osr, !x
-            // Jump to program origin
+                                        // Jump to program origin
             self.sm.exec_instr(0x0000 | origin as u16); // JMP origin
         }
 
@@ -907,7 +939,10 @@ impl<'d, PIO: Instance, const SM: usize, DMA: Channel> SpdifRx<'d, PIO, SM, DMA>
             self.sync_lost_count += 1;
             if self.state == State::Stable {
                 self.state = State::WaitingStable;
-                warn!("S/PDIF sync lost (bad sync codes: {}/{})", sync_count, dma_size);
+                warn!(
+                    "S/PDIF sync lost (bad sync codes: {}/{})",
+                    sync_count, dma_size
+                );
             }
             // Check if we've lost sync for too long - trigger re-detection
             if self.sync_lost_count >= SYNC_LOST_THRESHOLD {

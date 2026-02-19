@@ -7,10 +7,7 @@
 //! Only the pages that were drawn to since the last flush are sent over I2C,
 //! reducing display update time from ~20ms (full) to ~2.5ms per dirty page.
 
-use embedded_graphics::{
-    pixelcolor::BinaryColor,
-    prelude::*,
-};
+use embedded_graphics::{pixelcolor::BinaryColor, prelude::*};
 use embedded_hal_async::i2c::I2c;
 
 /// SH1106 display width/height
@@ -53,22 +50,22 @@ impl<I2C: I2c> Sh1106<I2C> {
 
     /// Initialize the SH1106 display controller (128x64, rotated 180°)
     pub async fn init(&mut self) -> Result<(), I2C::Error> {
-        self.cmd(&[0xAE]).await?;        // Display OFF
-        self.cmd(&[0xD5, 0x80]).await?;  // Set display clock divide ratio
-        self.cmd(&[0xA8, 0x3F]).await?;  // Set multiplex ratio (63 = 64 rows)
-        self.cmd(&[0xD3, 0x00]).await?;  // Set display offset: 0
-        self.cmd(&[0x40]).await?;        // Set start line: 0
-        self.cmd(&[0x8D, 0x14]).await?;  // Charge pump enabled
-        self.cmd(&[0x20, 0x02]).await?;  // Page addressing mode
-        self.cmd(&[0xA0]).await?;        // Segment remap off (normal)
-        self.cmd(&[0xC0]).await?;        // COM scan normal
-        self.cmd(&[0xDA, 0x12]).await?;  // Set COM pins configuration
-        self.cmd(&[0x81, 0xCF]).await?;  // Set contrast
-        self.cmd(&[0xD9, 0xF1]).await?;  // Set pre-charge period
-        self.cmd(&[0xDB, 0x40]).await?;  // Set VCOMH deselect level
-        self.cmd(&[0xA4]).await?;        // Display follows RAM content
-        self.cmd(&[0xA6]).await?;        // Normal display (not inverted)
-        self.cmd(&[0xAF]).await?;        // Display ON
+        self.cmd(&[0xAE]).await?; // Display OFF
+        self.cmd(&[0xD5, 0x80]).await?; // Set display clock divide ratio
+        self.cmd(&[0xA8, 0x3F]).await?; // Set multiplex ratio (63 = 64 rows)
+        self.cmd(&[0xD3, 0x00]).await?; // Set display offset: 0
+        self.cmd(&[0x40]).await?; // Set start line: 0
+        self.cmd(&[0x8D, 0x14]).await?; // Charge pump enabled
+        self.cmd(&[0x20, 0x02]).await?; // Page addressing mode
+        self.cmd(&[0xA0]).await?; // Segment remap off (normal)
+        self.cmd(&[0xC0]).await?; // COM scan normal
+        self.cmd(&[0xDA, 0x12]).await?; // Set COM pins configuration
+        self.cmd(&[0x81, 0xCF]).await?; // Set contrast
+        self.cmd(&[0xD9, 0xF1]).await?; // Set pre-charge period
+        self.cmd(&[0xDB, 0x40]).await?; // Set VCOMH deselect level
+        self.cmd(&[0xA4]).await?; // Display follows RAM content
+        self.cmd(&[0xA6]).await?; // Normal display (not inverted)
+        self.cmd(&[0xAF]).await?; // Display ON
         Ok(())
     }
 
@@ -147,9 +144,9 @@ impl<I2C: I2c> Sh1106<I2C> {
     async fn flush_page(&mut self, page: u8) -> Result<(), I2C::Error> {
         // Set page address and column
         let cmd = [
-            0x00,               // Control byte: commands follow
-            0xB0 | page,        // Set page address
-            COL_OFFSET & 0x0F,  // Lower column address nibble
+            0x00,                     // Control byte: commands follow
+            0xB0 | page,              // Set page address
+            COL_OFFSET & 0x0F,        // Lower column address nibble
             0x10 | (COL_OFFSET >> 4), // Upper column address nibble
         ];
         self.i2c.write(self.addr, &cmd).await?;

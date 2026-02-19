@@ -158,7 +158,7 @@ pub mod pio {
 
     /// PIO1 is used for I2S
     pub const I2S_PIO: u8 = 1;
-    pub const I2S_CONTROLLER_SM: u8 = 0;  // Clock generation
-    pub const I2S_ADC_SM: u8 = 1;     // ADC input
-    pub const I2S_AMP_SM: u8 = 2;     // Amplifier output
+    pub const I2S_CONTROLLER_SM: u8 = 0; // Clock generation
+    pub const I2S_ADC_SM: u8 = 1; // ADC input
+    pub const I2S_AMP_SM: u8 = 2; // Amplifier output
 }

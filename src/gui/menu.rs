@@ -8,7 +8,7 @@ use embedded_graphics::{
 };
 use heapless::Vec;
 
-use super::{text_style, text_style_inverted, filled_style, DISPLAY_WIDTH};
+use super::{filled_style, text_style, text_style_inverted, DISPLAY_WIDTH};
 
 /// Maximum number of menu items
 pub const MAX_MENU_ITEMS: usize = 8;
@@ -191,12 +191,8 @@ impl Menu {
                 .draw(display)?;
 
                 // Draw text inverted
-                Text::new(
-                    item.label,
-                    Point::new(4, y + 10),
-                    text_style_inverted(),
-                )
-                .draw(display)?;
+                Text::new(item.label, Point::new(4, y + 10), text_style_inverted())
+                    .draw(display)?;
             } else {
                 // Draw normal text
                 let style = if item.enabled {
@@ -230,9 +226,18 @@ impl Menu {
 pub fn create_main_menu() -> Menu {
     let mut menu = Menu::new("Menu");
     menu.add_item(MenuItem::new("Volume", MenuAction::AdjustVolume));
-    menu.add_item(MenuItem::new("Source", MenuAction::GoToScreen(super::ScreenId::SourceSelect)));
-    menu.add_item(MenuItem::new("EQ", MenuAction::GoToScreen(super::ScreenId::Equalizer)));
-    menu.add_item(MenuItem::new("Settings", MenuAction::GoToScreen(super::ScreenId::Settings)));
+    menu.add_item(MenuItem::new(
+        "Source",
+        MenuAction::GoToScreen(super::ScreenId::SourceSelect),
+    ));
+    menu.add_item(MenuItem::new(
+        "EQ",
+        MenuAction::GoToScreen(super::ScreenId::Equalizer),
+    ));
+    menu.add_item(MenuItem::new(
+        "Settings",
+        MenuAction::GoToScreen(super::ScreenId::Settings),
+    ));
     menu
 }
 
@@ -241,10 +246,22 @@ pub fn create_source_menu() -> Menu {
     use super::widgets::AudioSource;
 
     let mut menu = Menu::new("Source");
-    menu.add_item(MenuItem::new("Auto", MenuAction::SelectSource(AudioSource::None)));
-    menu.add_item(MenuItem::new("Line In", MenuAction::SelectSource(AudioSource::LineIn)));
-    menu.add_item(MenuItem::new("S/PDIF", MenuAction::SelectSource(AudioSource::Spdif)));
-    menu.add_item(MenuItem::new("USB Audio", MenuAction::SelectSource(AudioSource::Usb)));
+    menu.add_item(MenuItem::new(
+        "Auto",
+        MenuAction::SelectSource(AudioSource::None),
+    ));
+    menu.add_item(MenuItem::new(
+        "Line In",
+        MenuAction::SelectSource(AudioSource::LineIn),
+    ));
+    menu.add_item(MenuItem::new(
+        "S/PDIF",
+        MenuAction::SelectSource(AudioSource::Spdif),
+    ));
+    menu.add_item(MenuItem::new(
+        "USB Audio",
+        MenuAction::SelectSource(AudioSource::Usb),
+    ));
     menu.add_item(MenuItem::new("< Back", MenuAction::Back));
     menu
 }

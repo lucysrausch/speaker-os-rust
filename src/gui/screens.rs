@@ -7,10 +7,14 @@ use embedded_graphics::{
 };
 
 use super::{
-    clear_display, title_style, text_style,
+    clear_display,
     display::Sh1106,
-    widgets::{AudioSource, ClipWarning, LargeVolumeDisplay, LevelMeter, SignalStatus, StatusBar, VolumeBar},
-    menu::{Menu, MenuAction, create_main_menu, create_source_menu},
+    menu::{create_main_menu, create_source_menu, Menu, MenuAction},
+    text_style, title_style,
+    widgets::{
+        AudioSource, ClipWarning, LargeVolumeDisplay, LevelMeter, SignalStatus, StatusBar,
+        VolumeBar,
+    },
     DISPLAY_HEIGHT, DISPLAY_WIDTH,
 };
 
@@ -99,7 +103,9 @@ pub struct HomeScreen {
 
 impl HomeScreen {
     pub fn new() -> Self {
-        Self { show_menu_hint: true }
+        Self {
+            show_menu_hint: true,
+        }
     }
 
     pub fn draw<D>(&self, display: &mut D, state: &AppState) -> Result<(), D::Error>
@@ -114,8 +120,10 @@ impl HomeScreen {
 
         // Level meters (y=15, takes ~14px)
         let meter = LevelMeter::new(
-            state.level_left, state.level_right,
-            state.peak_left, state.peak_right,
+            state.level_left,
+            state.level_right,
+            state.peak_left,
+            state.peak_right,
         );
         meter.draw(display, 15)?;
 
@@ -154,13 +162,15 @@ impl HomeScreen {
         // Only clear the bar fill interiors, not outlines or labels.
         // L bar fill: y=16..19 (4px tall), x=11..124 (inside 1px outline)
         // R bar fill: y=23..26 (4px tall), x=11..124
-        display.clear_region(11, 16, 114, 4);  // L bar interior
-        display.clear_region(11, 23, 114, 4);  // R bar interior
+        display.clear_region(11, 16, 114, 4); // L bar interior
+        display.clear_region(11, 23, 114, 4); // R bar interior
 
         // Redraw just the bar fills and peak holds (not outlines/labels)
         let meter = LevelMeter::new(
-            state.level_left, state.level_right,
-            state.peak_left, state.peak_right,
+            state.level_left,
+            state.level_right,
+            state.peak_left,
+            state.peak_right,
         );
         meter.draw_fills(display, 15)?;
 
@@ -185,7 +195,11 @@ impl HomeScreen {
         Ok(())
     }
 
-    pub fn on_encoder_rotate(&mut self, direction: i8, state: &mut AppState) -> Option<ScreenAction> {
+    pub fn on_encoder_rotate(
+        &mut self,
+        direction: i8,
+        state: &mut AppState,
+    ) -> Option<ScreenAction> {
         // Directly adjust volume
         let new_vol = if direction > 0 {
             state.volume.saturating_add(2).min(100)
@@ -228,20 +242,19 @@ impl MainMenuScreen {
     {
         clear_display(display)?;
 
-        Text::with_alignment(
-            "MENU",
-            Point::new(64, 12),
-            title_style(),
-            Alignment::Center,
-        )
-        .draw(display)?;
+        Text::with_alignment("MENU", Point::new(64, 12), title_style(), Alignment::Center)
+            .draw(display)?;
 
         self.menu.draw(display, 16)?;
 
         Ok(())
     }
 
-    pub fn on_encoder_rotate(&mut self, direction: i8, _state: &mut AppState) -> Option<ScreenAction> {
+    pub fn on_encoder_rotate(
+        &mut self,
+        direction: i8,
+        _state: &mut AppState,
+    ) -> Option<ScreenAction> {
         if direction > 0 {
             self.menu.select_next();
         } else {
@@ -296,7 +309,11 @@ impl SourceSelectScreen {
         Ok(())
     }
 
-    pub fn on_encoder_rotate(&mut self, direction: i8, _state: &mut AppState) -> Option<ScreenAction> {
+    pub fn on_encoder_rotate(
+        &mut self,
+        direction: i8,
+        _state: &mut AppState,
+    ) -> Option<ScreenAction> {
         if direction > 0 {
             self.menu.select_next();
         } else {
@@ -363,7 +380,7 @@ impl BootScreen {
         )
         .draw(display)?;
 
-    Text::with_alignment(
+        Text::with_alignment(
             "by Faited & Lucia",
             Point::new(64, 34),
             text_style(),
@@ -419,7 +436,11 @@ impl EqualizerScreen {
         Ok(())
     }
 
-    pub fn on_encoder_rotate(&mut self, _direction: i8, _state: &mut AppState) -> Option<ScreenAction> {
+    pub fn on_encoder_rotate(
+        &mut self,
+        _direction: i8,
+        _state: &mut AppState,
+    ) -> Option<ScreenAction> {
         None
     }
 
@@ -473,7 +494,11 @@ impl SettingsScreen {
         Ok(())
     }
 
-    pub fn on_encoder_rotate(&mut self, _direction: i8, _state: &mut AppState) -> Option<ScreenAction> {
+    pub fn on_encoder_rotate(
+        &mut self,
+        _direction: i8,
+        _state: &mut AppState,
+    ) -> Option<ScreenAction> {
         None
     }
 

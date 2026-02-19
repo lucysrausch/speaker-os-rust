@@ -3,9 +3,9 @@
 //! Provides widgets and screens for the OLED display menu system.
 
 pub mod display;
-pub mod widgets;
-pub mod screens;
 pub mod menu;
+pub mod screens;
+pub mod widgets;
 
 use embedded_graphics::{
     mono_font::{ascii::FONT_6X10, ascii::FONT_9X15_BOLD, MonoTextStyle},
@@ -14,9 +14,9 @@ use embedded_graphics::{
     primitives::{PrimitiveStyle, Rectangle},
 };
 
-pub use menu::{Menu, MenuItem, MenuAction};
+pub use menu::{Menu, MenuAction, MenuItem};
 pub use screens::ScreenId;
-pub use widgets::{VolumeBar, SourceIndicator, StatusBar};
+pub use widgets::{SourceIndicator, StatusBar, VolumeBar};
 
 /// Display dimensions for SSD1306 128x64
 pub const DISPLAY_WIDTH: u32 = 128;

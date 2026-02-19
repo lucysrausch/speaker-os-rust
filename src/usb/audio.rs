@@ -2,7 +2,7 @@
 //!
 //! Receives audio data from USB host and makes it available for playback.
 
-use embassy_usb::class::uac1::speaker::{Feedback, Speaker, State, Stream, ControlMonitor, Volume};
+use embassy_usb::class::uac1::speaker::{ControlMonitor, Feedback, Speaker, State, Stream, Volume};
 use embassy_usb::class::uac1::{Channel, FeedbackRefresh, SampleWidth};
 use embassy_usb::driver::Driver;
 use embassy_usb::Builder;
@@ -116,7 +116,10 @@ impl<'d, D: Driver<'d> + 'd> UsbAudioReceiver<'d, D> {
     ///
     /// Returns the number of bytes read into the buffer.
     /// The buffer should be at least `max_packet_size` bytes.
-    pub async fn read_packet(&mut self, buf: &mut [u8]) -> Result<usize, embassy_usb::driver::EndpointError> {
+    pub async fn read_packet(
+        &mut self,
+        buf: &mut [u8],
+    ) -> Result<usize, embassy_usb::driver::EndpointError> {
         self.stream.read_packet(buf).await
     }
 
@@ -149,7 +152,10 @@ impl<'d, D: Driver<'d> + 'd> UsbAudioReceiver<'d, D> {
     /// of the actual sample consumption rate to prevent buffer under/overruns.
     ///
     /// `samples_consumed` is the number of stereo samples consumed since last call.
-    pub async fn update_feedback(&mut self, samples_consumed: u32) -> Result<(), embassy_usb::driver::EndpointError> {
+    pub async fn update_feedback(
+        &mut self,
+        samples_consumed: u32,
+    ) -> Result<(), embassy_usb::driver::EndpointError> {
         self.sample_count += samples_consumed;
 
         // Calculate feedback value
@@ -179,7 +185,10 @@ impl<'d, D: Driver<'d> + 'd> UsbAudioReceiver<'d, D> {
     }
 
     /// Write raw feedback value (10.14 fixed-point format)
-    pub async fn write_feedback_raw(&mut self, value: u32) -> Result<(), embassy_usb::driver::EndpointError> {
+    pub async fn write_feedback_raw(
+        &mut self,
+        value: u32,
+    ) -> Result<(), embassy_usb::driver::EndpointError> {
         let fb_bytes = value.to_le_bytes();
         self.feedback.write_packet(&fb_bytes[..3]).await
     }
@@ -191,7 +200,11 @@ impl<'d, D: Driver<'d> + 'd> UsbAudioReceiver<'d, D> {
 /// I2S expects 32-bit samples with audio in the upper 24 bits.
 ///
 /// Returns the number of stereo samples converted.
-pub fn usb_24bit_to_i2s_32bit(usb_data: &[u8], i2s_left: &mut [i32], i2s_right: &mut [i32]) -> usize {
+pub fn usb_24bit_to_i2s_32bit(
+    usb_data: &[u8],
+    i2s_left: &mut [i32],
+    i2s_right: &mut [i32],
+) -> usize {
     let bytes_per_stereo = 6; // 3 bytes * 2 channels
     let num_samples = usb_data.len() / bytes_per_stereo;
     let samples = num_samples.min(i2s_left.len()).min(i2s_right.len());
@@ -246,4 +259,3 @@ pub fn usb_24bit_to_stereo_packed(usb_data: &[u8], output: &mut [u64]) -> usize 
 
     samples
 }
-

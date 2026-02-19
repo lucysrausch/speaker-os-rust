@@ -17,23 +17,26 @@ mod gui;
 mod hw;
 mod usb;
 
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use embassy_executor::Spawner;
+use embassy_rp::bind_interrupts;
 use embassy_rp::block::ImageDef;
+use embassy_rp::flash::{Blocking, Flash};
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::i2c::{self, I2c};
 use embassy_rp::multicore::{spawn_core1, Stack};
 use embassy_rp::peripherals::USB;
 use embassy_rp::pio::Pio;
 use embassy_rp::usb::Driver as UsbDriver;
-use embassy_rp::bind_interrupts;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use static_cell::StaticCell;
 
-use crate::audio::{I2sTx, I2sRx, AudioRingBuffer, StereoFrame, ClockSpeed};
-use crate::audio::{SpdifRx, SpdifState, SPDIF_RX_FIFO_SIZE, DMA_BLOCK_SIZE as SPDIF_DMA_BLOCK_SIZE};
+use crate::audio::{AudioRingBuffer, ClockSpeed, I2sRx, I2sTx, StereoFrame};
+use crate::audio::{
+    SpdifRx, SpdifState, DMA_BLOCK_SIZE as SPDIF_DMA_BLOCK_SIZE, SPDIF_RX_FIFO_SIZE,
+};
 use embassy_rp::peripherals::{PIO0, PIO1};
 
 use cortex_m::asm;
@@ -49,9 +52,10 @@ bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => embassy_rp::usb::InterruptHandler<embassy_rp::peripherals::USB>;
 });
 
+use crate::drivers::settings::{self, PersistedSettings};
 use crate::drivers::{RotaryEncoder, Tas5830};
 use crate::gui::display::Sh1106;
-use crate::gui::screens::{AppState, HomeScreen, BootScreen};
+use crate::gui::screens::{AppState, BootScreen, HomeScreen};
 use crate::gui::widgets::{AudioSource, SignalStatus};
 use crate::hw::pins::i2c_addr;
 
@@ -112,6 +116,12 @@ static CURRENT_I2S_RATE: AtomicU32 = AtomicU32::new(96_000);
 static PEAK_LEFT: AtomicU32 = AtomicU32::new(0);
 static PEAK_RIGHT: AtomicU32 = AtomicU32::new(0);
 
+/// Initial volume loaded from flash (read by encoder task at startup)
+static INITIAL_VOLUME: AtomicU8 = AtomicU8::new(50);
+
+/// Initial mute state loaded from flash (read by encoder task at startup)
+static INITIAL_MUTED: AtomicBool = AtomicBool::new(false);
+
 /// Clip threshold: peaks above this level trigger the CLIP warning.
 /// Expressed as a fraction of i32::MAX. 99 = >99% of full range.
 const CLIP_THRESHOLD_PERCENT: u64 = 99;
@@ -141,6 +151,12 @@ async fn main(spawner: Spawner) {
     defmt::info!("OtterAmp DSP starting...");
 
     let p = embassy_rp::init(Default::default());
+
+    // Load saved settings from flash
+    let mut flash = Flash::<_, Blocking, { settings::FLASH_SIZE }>::new_blocking(p.FLASH);
+    let saved_settings = settings::load(&mut flash);
+    INITIAL_VOLUME.store(saved_settings.volume, Ordering::Relaxed);
+    INITIAL_MUTED.store(saved_settings.muted, Ordering::Relaxed);
 
     // Status LED (GPIO12 on custom board - LED0)
     let mut led = Output::new(p.PIN_12, Level::Low);
@@ -219,6 +235,13 @@ async fn main(spawner: Spawner) {
         defmt::error!("Failed to start TAS5830 playback: {:?}", e);
     }
 
+    // Restore saved volume/mute state
+    if saved_settings.muted {
+        let _ = amp.mute().await;
+    } else {
+        let _ = amp.set_volume_percent(saved_settings.volume).await;
+    }
+
     // Initialize I2S receiver for line-in ADC (PIO1 SM1)
     let i2s_rx = I2sRx::new(
         &mut pio1.common,
@@ -260,7 +283,9 @@ async fn main(spawner: Spawner) {
     let spdif_fifo = SPDIF_FIFO.init([0u32; SPDIF_RX_FIFO_SIZE]);
 
     // Spawn S/PDIF receiver task with full PIO access for rate switching
-    spawner.spawn(spdif_task(pio0, p.PIN_3, p.DMA_CH0, spdif_fifo)).unwrap();
+    spawner
+        .spawn(spdif_task(pio0, p.PIN_3, p.DMA_CH0, spdif_fifo))
+        .unwrap();
 
     boot_screen.set_progress(60, "Audio ready");
     let _ = boot_screen.draw(&mut display, &app_state);
@@ -275,8 +300,8 @@ async fn main(spawner: Spawner) {
 
     // Initialize rotary encoder
     let encoder = RotaryEncoder::new(
-        p.PIN_10,  // ENC_A
-        p.PIN_9, // ENC_B
+        p.PIN_10, // ENC_A
+        p.PIN_9,  // ENC_B
         p.PIN_8,  // ENC_BTN
     );
 
@@ -298,9 +323,13 @@ async fn main(spawner: Spawner) {
 
     // Switch to home screen
     let mut home_screen = HomeScreen::new();
-    let mut app_state = AppState::default();
-    app_state.source = AudioSource::LineIn;
-    app_state.signal_status = SignalStatus::Ok;
+    let mut app_state = AppState {
+        volume: saved_settings.volume,
+        muted: saved_settings.muted,
+        source: AudioSource::LineIn,
+        signal_status: SignalStatus::Ok,
+        ..AppState::default()
+    };
 
     let _ = home_screen.draw(&mut display, &app_state);
     let _ = display.flush_all().await;
@@ -321,8 +350,11 @@ async fn main(spawner: Spawner) {
     let mut clip_flash_counter: u8 = 0;
     let mut clip_flash_on = false;
     let mut display_refresh_counter: u8 = 0;
-    let mut display_dirty = true; // Track whether display needs redraw
+    let mut display_dirty = true; // Track whether display needs full redraw
+    let mut volume_dirty = false; // Track whether only volume region needs redraw
     let mut prev_clip_flash = false;
+    let mut save_pending = false;
+    let mut save_deadline = Instant::now();
 
     // If USB is already connected at boot, start with USB
     if prev_vbus_present {
@@ -411,6 +443,9 @@ async fn main(spawner: Spawner) {
                     if let Err(e) = amp.set_volume_percent(vol).await {
                         defmt::error!("Failed to set volume: {:?}", e);
                     }
+                    volume_dirty = true;
+                    save_pending = true;
+                    save_deadline = Instant::now() + Duration::from_secs(2);
                 }
                 AppStateUpdate::MuteToggled(muted) => {
                     app_state.muted = muted;
@@ -419,14 +454,18 @@ async fn main(spawner: Spawner) {
                     } else {
                         let _ = amp.unmute().await;
                     }
+                    volume_dirty = true;
+                    save_pending = true;
+                    save_deadline = Instant::now() + Duration::from_secs(2);
                 }
                 AppStateUpdate::SampleRateChanged(rate) => {
                     app_state.sample_rate = rate;
+                    display_dirty = true;
                 }
-                // SourceChanged and SignalDetected now handled by source arbitration above
-                _ => {}
+                _ => {
+                    display_dirty = true;
+                }
             }
-            display_dirty = true;
         }
 
         // --- Level metering (every 30ms = 33fps for smooth bar animation) ---
@@ -452,11 +491,11 @@ async fn main(spawner: Spawner) {
 
             peak_decay_counter += 1;
             if peak_decay_counter >= 2 {
-                peak_decay_counter = 0;                
+                peak_decay_counter = 0;
                 peak_hold_left = peak_hold_left.saturating_sub(1);
                 peak_hold_right = peak_hold_right.saturating_sub(1);
             }
-            
+
             app_state.peak_left = peak_hold_left;
             app_state.peak_right = peak_hold_right;
 
@@ -506,17 +545,35 @@ async fn main(spawner: Spawner) {
             }
         }
 
-        // Full redraw for UI text/state changes (source, volume, mute, sample rate)
+        // Volume-only partial redraw (only the volume number region, ~2 pages)
+        if volume_dirty && !display_dirty {
+            volume_dirty = false;
+            let _ = home_screen.draw_clip_region(&mut display, &app_state);
+        }
+
+        // Full redraw for UI text/state changes (source, sample rate, etc.)
         if display_dirty {
             display_dirty = false;
+            volume_dirty = false;
             let _ = home_screen.draw(&mut display, &app_state);
-            // Mark all pages dirty for full redraw
         }
 
         // Flush at most ONE dirty page per tick (~2.5ms I2C write).
         // This spreads display updates over multiple ticks instead of
         // bursting all dirty pages at once, preventing audio stutter.
         let _ = display.flush_one_page().await;
+
+        // Debounced settings save: write to flash 2s after last volume/mute change
+        if save_pending && Instant::now() >= save_deadline {
+            save_pending = false;
+            settings::save(
+                &mut flash,
+                &PersistedSettings {
+                    volume: app_state.volume,
+                    muted: app_state.muted,
+                },
+            );
+        }
 
         // Small yield to prevent busy-looping
         Timer::after(Duration::from_millis(1)).await;
@@ -530,8 +587,8 @@ async fn encoder_task(mut encoder: RotaryEncoder<'static>) {
 
     defmt::info!("Encoder task started");
 
-    let mut volume: u8 = 50;
-    let mut muted = false;
+    let mut volume: u8 = INITIAL_VOLUME.load(Ordering::Relaxed);
+    let mut muted = INITIAL_MUTED.load(Ordering::Relaxed);
 
     loop {
         encoder.wait_for_edge().await;
@@ -816,10 +873,7 @@ async fn spdif_task(
 
                 // Run DMA and processing CONCURRENTLY - this is critical!
                 // While DMA drains the PIO FIFO, we process the previous batch
-                join(
-                    spdif.process_dma(SPDIF_DMA_BLOCK_SIZE),
-                    process_fut
-                ).await;
+                join(spdif.process_dma(SPDIF_DMA_BLOCK_SIZE), process_fut).await;
 
                 // Save current buffer for next iteration's processing
                 prev_raw_buffer[..count].copy_from_slice(&raw_buffer[..count]);
@@ -897,7 +951,7 @@ async fn usb_task(usb: embassy_rp::Peri<'static, USB>) {
     let (mut stream, _feedback, control) = Speaker::new(
         &mut builder,
         state,
-        640, // max packet size with margin for 96kHz
+        640,                     // max packet size with margin for 96kHz
         SampleWidth::Width3Byte, // 24-bit
         &SAMPLE_RATES,
         &CHANNELS,
@@ -988,7 +1042,8 @@ async fn usb_task(usb: embassy_rp::Peri<'static, USB>) {
                             last_volume_db = Some(vol_db);
                             // Convert dB to percentage (range is -100dB to 0dB per UAC1 spec)
                             // 0dB = 100%, -100dB = 0%
-                            let percent = ((vol_db + 100.0) / 100.0 * 100.0).clamp(0.0, 100.0) as u8;
+                            let percent =
+                                ((vol_db + 100.0) / 100.0 * 100.0).clamp(0.0, 100.0) as u8;
                             let _ = STATE_CHANNEL.try_send(AppStateUpdate::VolumeChanged(percent));
                             defmt::info!("USB volume: {} dB ({}%)", vol_db, percent);
                         }
@@ -1051,7 +1106,9 @@ fn core1_audio_main() -> ! {
                 i2s_tx.stop();
                 i2s_tx.set_sample_rate(pending);
                 CURRENT_I2S_RATE.store(pending, Ordering::Release);
-                unsafe { AUDIO_INPUT.clear(); }
+                unsafe {
+                    AUDIO_INPUT.clear();
+                }
                 i2s_tx.start();
 
                 // Reset check counter
@@ -1092,9 +1149,9 @@ fn core1_audio_main() -> ! {
                 // S/PDIF or USB: adaptive clock for external source drift
                 let available = unsafe { &AUDIO_INPUT }.available();
                 let speed = match available {
-                    0..=63 => ClockSpeed::Slow,      // Buffer low, slow down output
-                    64..=191 => ClockSpeed::Normal,  // Buffer OK (target ~128)
-                    _ => ClockSpeed::Fast,           // Buffer high, speed up output
+                    0..=63 => ClockSpeed::Slow,     // Buffer low, slow down output
+                    64..=191 => ClockSpeed::Normal, // Buffer OK (target ~128)
+                    _ => ClockSpeed::Fast,          // Buffer high, speed up output
                 };
                 i2s_tx.adjust_clock(speed);
             }

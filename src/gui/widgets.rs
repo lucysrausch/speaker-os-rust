@@ -1,5 +1,6 @@
 //! GUI widgets for the OLED display
 
+use core::fmt::Write;
 use embedded_graphics::{
     mono_font::{ascii::FONT_6X10, ascii::FONT_6X9, MonoTextStyle},
     pixelcolor::BinaryColor,
@@ -8,9 +9,8 @@ use embedded_graphics::{
     text::{Alignment, Text},
 };
 use heapless::String;
-use core::fmt::Write;
 
-use super::{DISPLAY_WIDTH, DISPLAY_HEIGHT, text_style, filled_style, outline_style};
+use super::{filled_style, outline_style, text_style, DISPLAY_HEIGHT, DISPLAY_WIDTH};
 
 /// Audio input source
 #[derive(Debug, Clone, Copy, PartialEq, Eq, defmt::Format)]
@@ -73,12 +73,7 @@ impl VolumeBar {
         let bar_y = position.y + 8;
 
         // Draw "VOL" label
-        Text::new(
-            "VOL",
-            Point::new(position.x, position.y + 16),
-            text_style(),
-        )
-        .draw(display)?;
+        Text::new("VOL", Point::new(position.x, position.y + 16), text_style()).draw(display)?;
 
         // Draw outer border
         RoundedRectangle::with_equal_corners(
@@ -169,20 +164,14 @@ impl SourceIndicator {
 
         if self.signal_detected {
             // Filled circle for signal present
-            Rectangle::new(
-                Point::new(indicator_x, indicator_y),
-                Size::new(6, 6),
-            )
-            .into_styled(filled_style())
-            .draw(display)?;
+            Rectangle::new(Point::new(indicator_x, indicator_y), Size::new(6, 6))
+                .into_styled(filled_style())
+                .draw(display)?;
         } else {
             // Empty circle for no signal
-            Rectangle::new(
-                Point::new(indicator_x, indicator_y),
-                Size::new(6, 6),
-            )
-            .into_styled(outline_style())
-            .draw(display)?;
+            Rectangle::new(Point::new(indicator_x, indicator_y), Size::new(6, 6))
+                .into_styled(outline_style())
+                .draw(display)?;
         }
 
         Ok(())
@@ -224,12 +213,7 @@ impl StatusBar {
         D: DrawTarget<Color = BinaryColor>,
     {
         // Draw source on the left
-        Text::new(
-            self.source.short_name(),
-            Point::new(2, 10),
-            text_style(),
-        )
-        .draw(display)?;
+        Text::new(self.source.short_name(), Point::new(2, 10), text_style()).draw(display)?;
 
         // Draw sample rate in center
         let mut rate_str: String<12> = String::new();
@@ -261,12 +245,9 @@ impl StatusBar {
         .draw(display)?;
 
         // Draw separator line
-        Rectangle::new(
-            Point::new(0, 13),
-            Size::new(DISPLAY_WIDTH, 1),
-        )
-        .into_styled(filled_style())
-        .draw(display)?;
+        Rectangle::new(Point::new(0, 13), Size::new(DISPLAY_WIDTH, 1))
+            .into_styled(filled_style())
+            .draw(display)?;
 
         Ok(())
     }
@@ -308,13 +289,8 @@ impl LargeVolumeDisplay {
             let _ = write!(vol_str, "{}%", self.volume);
         }
 
-        Text::with_alignment(
-            &vol_str,
-            Point::new(64, y),
-            large_style,
-            Alignment::Center,
-        )
-        .draw(display)?;
+        Text::with_alignment(&vol_str, Point::new(64, y), large_style, Alignment::Center)
+            .draw(display)?;
 
         Ok(())
     }
@@ -326,10 +302,10 @@ impl LargeVolumeDisplay {
 /// Each bar shows the current level as a filled rectangle and the peak hold as
 /// a 1px-wide vertical line that decays slowly.
 pub struct LevelMeter {
-    pub left_level: u8,   // 0-100
-    pub right_level: u8,  // 0-100
-    pub left_peak: u8,    // 0-100
-    pub right_peak: u8,   // 0-100
+    pub left_level: u8,  // 0-100
+    pub right_level: u8, // 0-100
+    pub left_peak: u8,   // 0-100
+    pub right_peak: u8,  // 0-100
 }
 
 impl LevelMeter {
@@ -339,7 +315,12 @@ impl LevelMeter {
     const BAR_HEIGHT: u32 = 4;
 
     pub fn new(left_level: u8, right_level: u8, left_peak: u8, right_peak: u8) -> Self {
-        Self { left_level, right_level, left_peak, right_peak }
+        Self {
+            left_level,
+            right_level,
+            left_peak,
+            right_peak,
+        }
     }
 
     /// Draw at a given Y position. Uses ~14px of vertical space.
@@ -367,13 +348,7 @@ impl LevelMeter {
         Ok(())
     }
 
-    fn draw_fill<D>(
-        &self,
-        display: &mut D,
-        level: u8,
-        peak: u8,
-        y: i32,
-    ) -> Result<(), D::Error>
+    fn draw_fill<D>(&self, display: &mut D, level: u8, peak: u8, y: i32) -> Result<(), D::Error>
     where
         D: DrawTarget<Color = BinaryColor>,
     {
@@ -390,13 +365,12 @@ impl LevelMeter {
 
         // Peak hold indicator (1px wide vertical line)
         if peak > 0 {
-            let peak_x = Self::BAR_X + 1 + (peak as u32 * Self::BAR_WIDTH / 100).min(Self::BAR_WIDTH - 1) as i32;
-            Rectangle::new(
-                Point::new(peak_x, y + 1),
-                Size::new(1, Self::BAR_HEIGHT),
-            )
-            .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
-            .draw(display)?;
+            let peak_x = Self::BAR_X
+                + 1
+                + (peak as u32 * Self::BAR_WIDTH / 100).min(Self::BAR_WIDTH - 1) as i32;
+            Rectangle::new(Point::new(peak_x, y + 1), Size::new(1, Self::BAR_HEIGHT))
+                .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+                .draw(display)?;
         }
 
         Ok(())
@@ -439,13 +413,12 @@ impl LevelMeter {
 
         // Peak hold indicator (1px wide vertical line)
         if peak > 0 {
-            let peak_x = Self::BAR_X + 1 + (peak as u32 * Self::BAR_WIDTH / 100).min(Self::BAR_WIDTH - 1) as i32;
-            Rectangle::new(
-                Point::new(peak_x, y + 1),
-                Size::new(1, Self::BAR_HEIGHT),
-            )
-            .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
-            .draw(display)?;
+            let peak_x = Self::BAR_X
+                + 1
+                + (peak as u32 * Self::BAR_WIDTH / 100).min(Self::BAR_WIDTH - 1) as i32;
+            Rectangle::new(Point::new(peak_x, y + 1), Size::new(1, Self::BAR_HEIGHT))
+                .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+                .draw(display)?;
         }
 
         Ok(())
@@ -472,12 +445,9 @@ impl ClipWarning {
         let rect_x = (super::DISPLAY_WIDTH as i32 - rect_w as i32) / 2;
         let rect_y = y_center - rect_h as i32 / 2;
 
-        Rectangle::new(
-            Point::new(rect_x, rect_y),
-            Size::new(rect_w, rect_h),
-        )
-        .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
-        .draw(display)?;
+        Rectangle::new(Point::new(rect_x, rect_y), Size::new(rect_w, rect_h))
+            .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+            .draw(display)?;
 
         // Draw "CLIP" text in inverted color
         let clip_style = MonoTextStyle::new(&FONT_10X20, BinaryColor::Off);
