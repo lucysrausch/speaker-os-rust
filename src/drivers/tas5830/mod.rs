@@ -77,6 +77,29 @@ impl<E> From<E> for Error<E> {
     }
 }
 
+// ── Volume helpers ────────────────────────────────────────────────────────
+
+/// Convert a volume percentage (0–100) to a DIG_VOL register value.
+///
+/// Uses log2 scaling for a perceptually linear volume curve.
+/// Returns a value suitable for [`DspConfig::digital_volume`] or
+/// [`Tas5830::set_volume()`].
+pub fn volume_percent_to_reg(percent: u8) -> u8 {
+    use micromath::F32Ext;
+    const VOL_START: f32 = 0.5;
+    const VOL_SCALE: f32 = 30.0;
+    const VOL_RANGE: f32 = VOL_START + VOL_SCALE;
+    let vol_scaled =
+        ((percent as f32) / 100.0 * VOL_SCALE).clamp(0.001, VOL_SCALE) + VOL_START;
+    let percent_scaled =
+        (vol_scaled.log2() / VOL_RANGE.log2() * 100.0).clamp(0.0, 100.0) as u8;
+    if percent_scaled >= 100 {
+        0x00
+    } else {
+        0xCF - ((percent_scaled as u16 * 0xCF) / 100) as u8
+    }
+}
+
 // ── DSP configuration ──────────────────────────────────────────────────────
 
 /// Complete DSP configuration for boot or full reconfiguration.
@@ -276,6 +299,7 @@ where
     pub async fn set_volume(&mut self, volume: u8) -> Result<(), Error<E>> {
         self.volume = volume;
         if !self.muted {
+            self.set_book_page(regs::BOOK_CTRL, 0x00).await?;
             self.write_reg(regs::DIG_VOL, volume).await?;
         }
         defmt::debug!(
@@ -288,23 +312,12 @@ where
 
     /// Set volume as a percentage (0–100) with log2 scaling.
     pub async fn set_volume_percent(&mut self, percent: u8) -> Result<(), Error<E>> {
-        const VOL_START: f32 = 0.5;
-        const VOL_SCALE: f32 = 30.0;
-        const VOL_RANGE: f32 = VOL_START + VOL_SCALE;
-        let vol_scaled =
-            ((percent as f32) / 100.0 * VOL_SCALE).clamp(0.001, VOL_SCALE) + VOL_START;
-        let percent_scaled =
-            (vol_scaled.log2() / VOL_RANGE.log2() * 100.0).clamp(0.0, 100.0) as u8;
+        let volume = volume_percent_to_reg(percent);
         defmt::info!(
-            "TAS5830 set volume percent: {} scaled: {}",
+            "TAS5830 set volume percent: {} -> reg {:#04x}",
             percent,
-            percent_scaled
+            volume
         );
-        let volume = if percent_scaled >= 100 {
-            0x00
-        } else {
-            0xCF - ((percent_scaled as u16 * 0xCF) / 100) as u8
-        };
         self.set_volume(volume).await
     }
 
@@ -320,6 +333,7 @@ where
     /// Mute (digital, via volume register).
     pub async fn mute(&mut self) -> Result<(), Error<E>> {
         self.muted = true;
+        self.set_book_page(regs::BOOK_CTRL, 0x00).await?;
         self.write_reg(regs::DIG_VOL, 0xFF).await?;
         defmt::debug!("TAS5830 muted");
         Ok(())
@@ -328,6 +342,7 @@ where
     /// Unmute (restore previous volume).
     pub async fn unmute(&mut self) -> Result<(), Error<E>> {
         self.muted = false;
+        self.set_book_page(regs::BOOK_CTRL, 0x00).await?;
         self.write_reg(regs::DIG_VOL, self.volume).await?;
         defmt::debug!("TAS5830 unmuted");
         Ok(())

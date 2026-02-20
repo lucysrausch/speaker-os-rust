@@ -415,16 +415,20 @@ async fn main(spawner: Spawner) {
     // BCLK/WCLK actively clocking to enter Play mode.
     embassy_time::Timer::after(embassy_time::Duration::from_millis(100)).await;
 
+    // Apply saved volume to DSP config so the amp initializes at the
+    // correct level (config file has a fixed default, not the user's level).
+    let mut dsp_config = dsp_config;
+    dsp_config.digital_volume =
+        crate::drivers::tas5830::volume_percent_to_reg(saved_settings.volume);
+
     // Now that I2S clocks are running, transition TAS5830 to PLAY
     if let Err(e) = amp.play(&dsp_config).await {
         defmt::error!("Failed to start TAS5830 playback: {:?}", e);
     }
 
-    // Restore saved volume/mute state
+    // Apply saved mute state (play() always starts unmuted)
     if saved_settings.muted {
         let _ = amp.mute().await;
-    } else {
-        let _ = amp.set_volume_percent(saved_settings.volume).await;
     }
 
     // Initialize S/PDIF input using PIO0
@@ -910,12 +914,17 @@ async fn encoder_task(mut encoder: RotaryEncoder<'static>) {
                     let _ = STATE_CHANNEL.try_send(AppStateUpdate::EncoderRotate(-1));
                 }
                 EncoderEvent::Press => {
+                    // Ignore button-down — wait for Release or LongPress
+                    // so long-press (mute toggle) isn't preempted by
+                    // short-press (menu open).
+                }
+                EncoderEvent::Release => {
+                    // Short press (button-up within 500ms)
                     let _ = STATE_CHANNEL.try_send(AppStateUpdate::EncoderPress);
                 }
                 EncoderEvent::LongPress => {
                     let _ = STATE_CHANNEL.try_send(AppStateUpdate::EncoderLongPress);
                 }
-                EncoderEvent::Release => {}
             }
         }
     }
