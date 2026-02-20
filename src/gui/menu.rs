@@ -33,6 +33,8 @@ pub enum MenuAction {
     LoadDspPreset,
     /// System settings
     Settings,
+    /// Enter USB config mode (reboot into MSC)
+    UsbConfigMode,
     /// Go back to previous screen
     Back,
     /// No action
@@ -238,6 +240,14 @@ pub fn create_main_menu() -> Menu {
         "Settings",
         MenuAction::GoToScreen(super::ScreenId::Settings),
     ));
+    menu
+}
+
+/// Settings menu items
+pub fn create_settings_menu() -> Menu {
+    let mut menu = Menu::new("Settings");
+    menu.add_item(MenuItem::new("USB Config", MenuAction::UsbConfigMode));
+    menu.add_item(MenuItem::new("< Back", MenuAction::Back));
     menu
 }
 

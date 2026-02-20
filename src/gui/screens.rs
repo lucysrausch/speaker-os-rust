@@ -9,7 +9,7 @@ use embedded_graphics::{
 use super::{
     clear_display,
     display::Sh1106,
-    menu::{create_main_menu, create_source_menu, Menu, MenuAction},
+    menu::{create_main_menu, create_settings_menu, create_source_menu, Menu, MenuAction},
     text_style, title_style,
     widgets::{
         AudioSource, ClipWarning, LargeVolumeDisplay, LevelMeter, SignalStatus, StatusBar,
@@ -35,6 +35,8 @@ pub enum ScreenId {
     Settings,
     /// Volume adjustment overlay
     VolumeAdjust,
+    /// USB config mode splash screen
+    UsbConfig,
 }
 
 /// Application state shared with the GUI
@@ -94,6 +96,8 @@ pub enum ScreenAction {
     ChangeSource(AudioSource),
     /// Refresh display
     Refresh,
+    /// Enter USB config mode (set watchdog scratch + reboot)
+    EnterUsbConfigMode,
 }
 
 /// Home screen - shows volume and source
@@ -453,12 +457,16 @@ impl EqualizerScreen {
     }
 }
 
-/// Placeholder for Settings screen
-pub struct SettingsScreen;
+/// Settings screen with USB Config option
+pub struct SettingsScreen {
+    menu: Menu,
+}
 
 impl SettingsScreen {
     pub fn new() -> Self {
-        Self
+        Self {
+            menu: create_settings_menu(),
+        }
     }
 
     pub fn draw<D>(&self, display: &mut D, _state: &AppState) -> Result<(), D::Error>
@@ -475,38 +483,83 @@ impl SettingsScreen {
         )
         .draw(display)?;
 
-        Text::with_alignment(
-            "Coming soon...",
-            Point::new(64, 36),
-            text_style(),
-            Alignment::Center,
-        )
-        .draw(display)?;
-
-        Text::with_alignment(
-            "Press to go back",
-            Point::new(64, 56),
-            text_style(),
-            Alignment::Center,
-        )
-        .draw(display)?;
+        self.menu.draw(display, 16)?;
 
         Ok(())
     }
 
     pub fn on_encoder_rotate(
         &mut self,
-        _direction: i8,
+        direction: i8,
         _state: &mut AppState,
     ) -> Option<ScreenAction> {
-        None
+        if direction > 0 {
+            self.menu.select_next();
+        } else {
+            self.menu.select_previous();
+        }
+        Some(ScreenAction::Refresh)
     }
 
     pub fn on_encoder_press(&mut self, _state: &mut AppState) -> Option<ScreenAction> {
-        Some(ScreenAction::GoTo(ScreenId::MainMenu))
+        match self.menu.selected_action() {
+            MenuAction::UsbConfigMode => Some(ScreenAction::EnterUsbConfigMode),
+            MenuAction::Back => Some(ScreenAction::GoTo(ScreenId::MainMenu)),
+            _ => None,
+        }
     }
 
     pub fn on_encoder_long_press(&mut self, _state: &mut AppState) -> Option<ScreenAction> {
         Some(ScreenAction::GoTo(ScreenId::Home))
+    }
+}
+
+/// USB Config Mode screen (shown after reboot into config mode)
+pub struct UsbConfigScreen;
+
+impl UsbConfigScreen {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn draw<D>(&self, display: &mut D, _state: &AppState) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = BinaryColor>,
+    {
+        clear_display(display)?;
+
+        Text::with_alignment(
+            "USB CONFIG",
+            Point::new(64, 12),
+            title_style(),
+            Alignment::Center,
+        )
+        .draw(display)?;
+
+        Text::with_alignment(
+            "Connect USB cable",
+            Point::new(64, 30),
+            text_style(),
+            Alignment::Center,
+        )
+        .draw(display)?;
+
+        Text::with_alignment(
+            "Edit DSP.CFG",
+            Point::new(64, 42),
+            text_style(),
+            Alignment::Center,
+        )
+        .draw(display)?;
+
+        Text::with_alignment(
+            "Eject to save",
+            Point::new(64, 54),
+            text_style(),
+            Alignment::Center,
+        )
+        .draw(display)?;
+
+        Ok(())
     }
 }

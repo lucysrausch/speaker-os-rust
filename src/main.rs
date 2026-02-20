@@ -12,10 +12,12 @@
 #![no_main]
 
 mod audio;
+mod config;
 mod drivers;
 mod gui;
 mod hw;
 mod usb;
+mod usb_msc;
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use embassy_executor::Spawner;
@@ -55,9 +57,15 @@ bind_interrupts!(struct Irqs {
 use crate::drivers::settings::{self, PersistedSettings};
 use crate::drivers::{RotaryEncoder, Tas5830};
 use crate::gui::display::Sh1106;
-use crate::gui::screens::{AppState, BootScreen, HomeScreen};
+use crate::gui::screens::{
+    AppState, BootScreen, EqualizerScreen, HomeScreen, MainMenuScreen, ScreenAction, ScreenId,
+    SettingsScreen, SourceSelectScreen, UsbConfigScreen,
+};
 use crate::gui::widgets::{AudioSource, SignalStatus};
 use crate::hw::pins::{audio as audio_cfg, i2c_addr, i2c_freq};
+
+/// Watchdog scratch register magic value for USB config mode.
+const CONFIG_MODE_MAGIC: u32 = 0x0CF6_70DE;
 
 // RP2350 boot block - required for the chip to boot
 #[unsafe(link_section = ".start_block")]
@@ -116,11 +124,18 @@ static CURRENT_I2S_RATE: AtomicU32 = AtomicU32::new(audio_cfg::SAMPLE_RATE);
 static PEAK_LEFT: AtomicU32 = AtomicU32::new(0);
 static PEAK_RIGHT: AtomicU32 = AtomicU32::new(0);
 
-/// Initial volume loaded from flash (read by encoder task at startup)
-static INITIAL_VOLUME: AtomicU8 = AtomicU8::new(50);
+/// Flash handle for USB config mode (only used when `config_mode == true`).
+/// SAFETY: Only accessed from the config mode code path (single-threaded).
+static mut CONFIG_MODE_FLASH: Option<
+    Flash<'static, embassy_rp::peripherals::FLASH, Blocking, { settings::FLASH_SIZE }>,
+> = None;
 
-/// Initial mute state loaded from flash (read by encoder task at startup)
-static INITIAL_MUTED: AtomicBool = AtomicBool::new(false);
+/// Set the watchdog scratch register and reboot into USB config mode.
+fn enter_usb_config_mode() -> ! {
+    let scratch0_ptr = 0x400d_800Cu32 as *mut u32;
+    unsafe { core::ptr::write_volatile(scratch0_ptr, CONFIG_MODE_MAGIC) };
+    cortex_m::peripheral::SCB::sys_reset();
+}
 
 /// Clip threshold: peaks above this level trigger the CLIP warning.
 /// Expressed as a fraction of i32::MAX. 99 = >99% of full range.
@@ -158,6 +173,9 @@ pub enum AppStateUpdate {
     SourceChanged(AudioSource),
     SignalDetected(bool),
     SampleRateChanged(u32),
+    EncoderPress,
+    EncoderLongPress,
+    EncoderRotate(i8),
 }
 
 #[embassy_executor::main]
@@ -166,6 +184,21 @@ async fn main(spawner: Spawner) {
 
     let mut p = embassy_rp::init(Default::default());
     let pins = board_pins!(p);
+
+    // Check watchdog scratch register for config mode request.
+    // If the magic value is set, reboot into USB MSC config mode.
+    // Watchdog scratch0 is at base 0x400d_8000 + 0x0C (persists through soft reset).
+    let config_mode = {
+        let scratch0_ptr = 0x400d_800Cu32 as *mut u32;
+        let scratch = unsafe { core::ptr::read_volatile(scratch0_ptr) };
+        if scratch == CONFIG_MODE_MAGIC {
+            // Clear the magic so we don't loop forever
+            unsafe { core::ptr::write_volatile(scratch0_ptr, 0) };
+            true
+        } else {
+            false
+        }
+    };
 
     // Drive TAS5830 PDN low immediately to ensure clean reset on reflash.
     // Without this, the pin floats high during boot and the amp may be in
@@ -176,8 +209,6 @@ async fn main(spawner: Spawner) {
     // Load saved settings from flash
     let mut flash = Flash::<_, Blocking, { settings::FLASH_SIZE }>::new_blocking(p.FLASH);
     let saved_settings = settings::load(&mut flash);
-    INITIAL_VOLUME.store(saved_settings.volume, Ordering::Relaxed);
-    INITIAL_MUTED.store(saved_settings.muted, Ordering::Relaxed);
 
     // Status LED
     let mut led = Output::new(pins.led0, Level::Low);
@@ -225,6 +256,101 @@ async fn main(spawner: Spawner) {
     let _ = boot_screen.draw(&mut display, &app_state);
     let _ = display.flush_all().await;
 
+    // ── USB Config Mode ─────────────────────────────────────────────────
+    if config_mode {
+        defmt::info!("Entering USB Config Mode");
+        let usb_config_screen = UsbConfigScreen::new();
+        let _ = usb_config_screen.draw(&mut display, &app_state);
+        let _ = display.flush_all().await;
+
+        // Initialize USB as Mass Storage device
+        let driver = UsbDriver::new(p.USB, Irqs);
+
+        let mut usb_config = embassy_usb::Config::new(0x1209, 0x0002); // Separate PID for MSC
+        usb_config.manufacturer = Some("OtterAmp");
+        usb_config.product = Some("OtterDSP Config");
+        usb_config.serial_number = Some("CFG001");
+        usb_config.max_power = 100;
+        usb_config.max_packet_size_0 = 64;
+        // Required: builder.function() creates an IAD, which requires these fields
+        usb_config.composite_with_iads = true;
+        usb_config.device_class = 0xEF;
+        usb_config.device_sub_class = 0x02;
+        usb_config.device_protocol = 0x01;
+
+        static MSC_CONFIG_DESC: StaticCell<[u8; 256]> = StaticCell::new();
+        static MSC_BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
+        static MSC_MSOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
+        static MSC_CONTROL_BUF: StaticCell<[u8; 64]> = StaticCell::new();
+
+        let config_descriptor = MSC_CONFIG_DESC.init([0u8; 256]);
+        let bos_descriptor = MSC_BOS_DESC.init([0u8; 256]);
+        let msos_descriptor = MSC_MSOS_DESC.init([0u8; 256]);
+        let control_buf = MSC_CONTROL_BUF.init([0u8; 64]);
+
+        let mut builder = embassy_usb::Builder::new(
+            driver,
+            usb_config,
+            config_descriptor,
+            bos_descriptor,
+            msos_descriptor,
+            control_buf,
+        );
+
+        let mut msc = usb_msc::MscClass::new(&mut builder, 64);
+        let mut usb_dev = builder.build();
+
+        // Create virtual FAT12 filesystem backed by flash
+        fn flash_read_config(buf: &mut [u8]) -> u16 {
+            // SAFETY: Flash is only accessed from this task in config mode
+            let flash = unsafe {
+                &mut *core::ptr::addr_of_mut!(CONFIG_MODE_FLASH)
+            };
+            if let Some(flash) = flash.as_mut() {
+                if let Some(data) = config::flash::read_config(flash) {
+                    let len = data.len().min(buf.len());
+                    buf[..len].copy_from_slice(&data[..len]);
+                    return len as u16;
+                }
+            }
+            // If no config in flash, use built-in default
+            let default = config::DEFAULT_CONFIG;
+            let len = default.len().min(buf.len());
+            buf[..len].copy_from_slice(&default[..len]);
+            len as u16
+        }
+
+        fn flash_write_config(data: &[u8]) {
+            let flash = unsafe {
+                &mut *core::ptr::addr_of_mut!(CONFIG_MODE_FLASH)
+            };
+            if let Some(flash) = flash.as_mut() {
+                config::flash::write_config(flash, data);
+            }
+        }
+
+        // Store flash handle in a static for the callbacks
+        // SAFETY: Only accessed in config mode, single-threaded
+        unsafe {
+            CONFIG_MODE_FLASH = Some(flash);
+        }
+
+        let mut vfs = usb_msc::fat12::VirtualFat12::new(
+            flash_read_config,
+            flash_write_config,
+        );
+
+        defmt::info!("USB MSC ready, waiting for host...");
+
+        // Run USB device and MSC handler concurrently (never returns)
+        let usb_fut = usb_dev.run();
+        let msc_fut = msc.run(&mut vfs);
+        embassy_futures::join::join(usb_fut, msc_fut).await;
+
+        // Should never reach here, but just in case
+        cortex_m::peripheral::SCB::sys_reset();
+    }
+
     defmt::info!("Initializing TAS5830 amplifier...");
     boot_screen.set_progress(20, "Init amp...");
     let _ = boot_screen.draw(&mut display, &app_state);
@@ -253,17 +379,8 @@ async fn main(spawner: Spawner) {
         audio_cfg::SAMPLE_RATE,
     );
 
-    // I2S clocks are now running — transition TAS5830 to PLAY and unmute
-    if let Err(e) = amp.play().await {
-        defmt::error!("Failed to start TAS5830 playback: {:?}", e);
-    }
-
-    // Restore saved volume/mute state
-    if saved_settings.muted {
-        let _ = amp.mute().await;
-    } else {
-        let _ = amp.set_volume_percent(saved_settings.volume).await;
-    }
+    // Load DSP config from flash while I2S isn't running yet
+    let dsp_config = config::load_and_build_config(&mut flash);
 
     // Initialize I2S receiver for line-in ADC (PIO1 SM1)
     let i2s_rx = I2sRx::new(
@@ -293,6 +410,22 @@ async fn main(spawner: Spawner) {
 
     // Signal Core 1 that I2S is ready
     I2S_READY.store(true, Ordering::Release);
+
+    // Wait for Core 1 to start the I2S audio loop — the TAS5830 needs
+    // BCLK/WCLK actively clocking to enter Play mode.
+    embassy_time::Timer::after(embassy_time::Duration::from_millis(100)).await;
+
+    // Now that I2S clocks are running, transition TAS5830 to PLAY
+    if let Err(e) = amp.play(&dsp_config).await {
+        defmt::error!("Failed to start TAS5830 playback: {:?}", e);
+    }
+
+    // Restore saved volume/mute state
+    if saved_settings.muted {
+        let _ = amp.mute().await;
+    } else {
+        let _ = amp.set_volume_percent(saved_settings.volume).await;
+    }
 
     // Initialize S/PDIF input using PIO0
     defmt::info!("Initializing S/PDIF input...");
@@ -344,8 +477,13 @@ async fn main(spawner: Spawner) {
 
     Timer::after(Duration::from_millis(200)).await;
 
-    // Switch to home screen
+    // Switch to home screen — initialize all screens and state machine
+    let mut current_screen = ScreenId::Home;
     let mut home_screen = HomeScreen::new();
+    let mut main_menu_screen = MainMenuScreen::new();
+    let mut source_select_screen = SourceSelectScreen::new();
+    let mut equalizer_screen = EqualizerScreen::new();
+    let mut settings_screen = SettingsScreen::new();
     let mut app_state = AppState {
         volume: saved_settings.volume,
         muted: saved_settings.muted,
@@ -378,6 +516,7 @@ async fn main(spawner: Spawner) {
     let mut prev_clip_flash = false;
     let mut save_pending = false;
     let mut save_deadline = Instant::now();
+    let mut menu_rotate_accum: i8 = 0; // Accumulator to reduce menu rotation sensitivity
 
     // If USB is already connected at boot, start with USB
     if prev_vbus_present {
@@ -459,34 +598,162 @@ async fn main(spawner: Spawner) {
         }
 
         // --- Handle state updates from tasks ---
+        let mut pending_action: Option<ScreenAction> = None;
         if let Ok(update) = STATE_CHANNEL.try_receive() {
             match update {
                 AppStateUpdate::VolumeChanged(vol) => {
+                    // From USB volume control — always update amp
                     app_state.volume = vol;
                     if let Err(e) = amp.set_volume_percent(vol).await {
                         defmt::error!("Failed to set volume: {:?}", e);
                     }
-                    volume_dirty = true;
+                    if current_screen == ScreenId::Home {
+                        volume_dirty = true;
+                    }
                     save_pending = true;
                     save_deadline = Instant::now() + Duration::from_secs(2);
                 }
                 AppStateUpdate::MuteToggled(muted) => {
+                    // From USB mute control — always update amp
                     app_state.muted = muted;
                     if muted {
                         let _ = amp.mute().await;
                     } else {
                         let _ = amp.unmute().await;
                     }
-                    volume_dirty = true;
+                    if current_screen == ScreenId::Home {
+                        volume_dirty = true;
+                    }
                     save_pending = true;
                     save_deadline = Instant::now() + Duration::from_secs(2);
                 }
                 AppStateUpdate::SampleRateChanged(rate) => {
                     app_state.sample_rate = rate;
-                    display_dirty = true;
+                    if current_screen == ScreenId::Home {
+                        display_dirty = true;
+                    }
+                }
+                AppStateUpdate::EncoderRotate(dir) => {
+                    if current_screen == ScreenId::Home {
+                        // Volume: pass through every tick for fine control
+                        pending_action =
+                            home_screen.on_encoder_rotate(dir, &mut app_state);
+                    } else {
+                        // Menus: accumulate ticks, navigate every 2nd tick
+                        menu_rotate_accum += dir;
+                        if menu_rotate_accum >= 2 || menu_rotate_accum <= -2 {
+                            let menu_dir = if menu_rotate_accum > 0 { 1 } else { -1 };
+                            menu_rotate_accum = 0;
+                            pending_action = match current_screen {
+                                ScreenId::MainMenu => {
+                                    main_menu_screen
+                                        .on_encoder_rotate(menu_dir, &mut app_state)
+                                }
+                                ScreenId::SourceSelect => {
+                                    source_select_screen
+                                        .on_encoder_rotate(menu_dir, &mut app_state)
+                                }
+                                ScreenId::Equalizer => {
+                                    equalizer_screen
+                                        .on_encoder_rotate(menu_dir, &mut app_state)
+                                }
+                                ScreenId::Settings => {
+                                    settings_screen
+                                        .on_encoder_rotate(menu_dir, &mut app_state)
+                                }
+                                _ => None,
+                            };
+                        }
+                    }
+                }
+                AppStateUpdate::EncoderPress => {
+                    pending_action = match current_screen {
+                        ScreenId::Home => home_screen.on_encoder_press(&mut app_state),
+                        ScreenId::MainMenu => {
+                            main_menu_screen.on_encoder_press(&mut app_state)
+                        }
+                        ScreenId::SourceSelect => {
+                            source_select_screen.on_encoder_press(&mut app_state)
+                        }
+                        ScreenId::Equalizer => {
+                            equalizer_screen.on_encoder_press(&mut app_state)
+                        }
+                        ScreenId::Settings => {
+                            settings_screen.on_encoder_press(&mut app_state)
+                        }
+                        _ => None,
+                    };
+                }
+                AppStateUpdate::EncoderLongPress => {
+                    pending_action = match current_screen {
+                        ScreenId::Home => {
+                            home_screen.on_encoder_long_press(&mut app_state)
+                        }
+                        ScreenId::MainMenu => {
+                            main_menu_screen.on_encoder_long_press(&mut app_state)
+                        }
+                        ScreenId::SourceSelect => {
+                            source_select_screen.on_encoder_long_press(&mut app_state)
+                        }
+                        ScreenId::Equalizer => {
+                            equalizer_screen.on_encoder_long_press(&mut app_state)
+                        }
+                        ScreenId::Settings => {
+                            settings_screen.on_encoder_long_press(&mut app_state)
+                        }
+                        _ => None,
+                    };
                 }
                 _ => {
                     display_dirty = true;
+                }
+            }
+        }
+
+        // --- Handle screen actions from encoder events ---
+        if let Some(action) = pending_action {
+            match action {
+                ScreenAction::GoTo(screen) => {
+                    current_screen = screen;
+                    menu_rotate_accum = 0;
+                    display_dirty = true;
+                }
+                ScreenAction::Back => {
+                    current_screen = ScreenId::Home;
+                    menu_rotate_accum = 0;
+                    display_dirty = true;
+                }
+                ScreenAction::UpdateVolume(vol) => {
+                    if let Err(e) = amp.set_volume_percent(vol).await {
+                        defmt::error!("Failed to set volume: {:?}", e);
+                    }
+                    if current_screen == ScreenId::Home {
+                        volume_dirty = true;
+                    }
+                    save_pending = true;
+                    save_deadline = Instant::now() + Duration::from_secs(2);
+                }
+                ScreenAction::ToggleMute => {
+                    app_state.muted = !app_state.muted;
+                    if app_state.muted {
+                        let _ = amp.mute().await;
+                    } else {
+                        let _ = amp.unmute().await;
+                    }
+                    if current_screen == ScreenId::Home {
+                        volume_dirty = true;
+                    }
+                    save_pending = true;
+                    save_deadline = Instant::now() + Duration::from_secs(2);
+                }
+                ScreenAction::ChangeSource(_source) => {
+                    display_dirty = true;
+                }
+                ScreenAction::Refresh => {
+                    display_dirty = true;
+                }
+                ScreenAction::EnterUsbConfigMode => {
+                    enter_usb_config_mode();
                 }
             }
         }
@@ -561,17 +828,19 @@ async fn main(spawner: Spawner) {
             }
 
             // Partial update: only bar fill pixels (2 pages dirty instead of 6)
-            let _ = home_screen.draw_meters(&mut display, &app_state);
+            if current_screen == ScreenId::Home {
+                let _ = home_screen.draw_meters(&mut display, &app_state);
 
-            // Only redraw volume/clip area when clip state actually changes
-            if app_state.clip_flash != prev_clip_flash {
-                prev_clip_flash = app_state.clip_flash;
-                let _ = home_screen.draw_clip_region(&mut display, &app_state);
+                // Only redraw volume/clip area when clip state actually changes
+                if app_state.clip_flash != prev_clip_flash {
+                    prev_clip_flash = app_state.clip_flash;
+                    let _ = home_screen.draw_clip_region(&mut display, &app_state);
+                }
             }
         }
 
         // Volume-only partial redraw (only the volume number region, ~2 pages)
-        if volume_dirty && !display_dirty {
+        if volume_dirty && !display_dirty && current_screen == ScreenId::Home {
             volume_dirty = false;
             let _ = home_screen.draw_clip_region(&mut display, &app_state);
         }
@@ -580,7 +849,24 @@ async fn main(spawner: Spawner) {
         if display_dirty {
             display_dirty = false;
             volume_dirty = false;
-            let _ = home_screen.draw(&mut display, &app_state);
+            match current_screen {
+                ScreenId::Home => {
+                    let _ = home_screen.draw(&mut display, &app_state);
+                }
+                ScreenId::MainMenu => {
+                    let _ = main_menu_screen.draw(&mut display, &app_state);
+                }
+                ScreenId::SourceSelect => {
+                    let _ = source_select_screen.draw(&mut display, &app_state);
+                }
+                ScreenId::Equalizer => {
+                    let _ = equalizer_screen.draw(&mut display, &app_state);
+                }
+                ScreenId::Settings => {
+                    let _ = settings_screen.draw(&mut display, &app_state);
+                }
+                _ => {}
+            }
         }
 
         // Flush at most ONE dirty page per tick (~2.5ms I2C write).
@@ -605,39 +891,29 @@ async fn main(spawner: Spawner) {
     }
 }
 
-/// Encoder polling task
+/// Encoder polling task — sends raw events to main loop for screen-aware handling
 #[embassy_executor::task]
 async fn encoder_task(mut encoder: RotaryEncoder<'static>) {
     use crate::drivers::encoder::EncoderEvent;
 
     defmt::info!("Encoder task started");
 
-    let mut volume: u8 = INITIAL_VOLUME.load(Ordering::Relaxed);
-    let mut muted = INITIAL_MUTED.load(Ordering::Relaxed);
-
     loop {
         encoder.wait_for_edge().await;
 
         if let Some(event) = encoder.poll() {
-            defmt::debug!("Encoder event: {:?}", event);
-
             match event {
                 EncoderEvent::Increment => {
-                    volume = volume.saturating_add(2).min(100);
-                    let _ = STATE_CHANNEL.try_send(AppStateUpdate::VolumeChanged(volume));
+                    let _ = STATE_CHANNEL.try_send(AppStateUpdate::EncoderRotate(1));
                 }
                 EncoderEvent::Decrement => {
-                    volume = volume.saturating_sub(2);
-                    let _ = STATE_CHANNEL.try_send(AppStateUpdate::VolumeChanged(volume));
+                    let _ = STATE_CHANNEL.try_send(AppStateUpdate::EncoderRotate(-1));
                 }
                 EncoderEvent::Press => {
-                    // Short press could open menu
-                    defmt::info!("Encoder pressed");
+                    let _ = STATE_CHANNEL.try_send(AppStateUpdate::EncoderPress);
                 }
                 EncoderEvent::LongPress => {
-                    // Long press toggles mute
-                    muted = !muted;
-                    let _ = STATE_CHANNEL.try_send(AppStateUpdate::MuteToggled(muted));
+                    let _ = STATE_CHANNEL.try_send(AppStateUpdate::EncoderLongPress);
                 }
                 EncoderEvent::Release => {}
             }
