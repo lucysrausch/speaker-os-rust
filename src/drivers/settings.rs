@@ -81,7 +81,12 @@ pub fn load(flash: &mut Flash<'_, FLASH, Blocking, FLASH_SIZE>) -> PersistedSett
     let volume = buf[1].min(100);
     let muted = buf[2] != 0;
 
-    defmt::info!("Loaded settings from slot {}: volume={}, muted={}", idx, volume, muted);
+    defmt::info!(
+        "Loaded settings from slot {}: volume={}, muted={}",
+        idx,
+        volume,
+        muted
+    );
     PersistedSettings { volume, muted }
 }
 
@@ -99,7 +104,9 @@ pub fn save(flash: &mut Flash<'_, FLASH, Blocking, FLASH_SIZE>, settings: &Persi
             if flash.blocking_read(SETTINGS_OFFSET, &mut first).is_ok() && first[0] != 0xFF {
                 // Sector has corrupt data, erase it
                 defmt::warn!("Corrupt settings sector, erasing");
-                if let Err(e) = flash.blocking_erase(SETTINGS_OFFSET, SETTINGS_OFFSET + ERASE_SIZE as u32) {
+                if let Err(e) =
+                    flash.blocking_erase(SETTINGS_OFFSET, SETTINGS_OFFSET + ERASE_SIZE as u32)
+                {
                     defmt::error!("Flash erase failed: {:?}", defmt::Debug2Format(&e));
                     return;
                 }
@@ -120,7 +127,11 @@ pub fn save(flash: &mut Flash<'_, FLASH, Blocking, FLASH_SIZE>, settings: &Persi
             defmt::error!("Flash write failed: {:?}", defmt::Debug2Format(&e));
             return;
         }
-        defmt::info!("Settings saved to slot 0 (after erase): volume={}, muted={}", settings.volume, settings.muted);
+        defmt::info!(
+            "Settings saved to slot 0 (after erase): volume={}, muted={}",
+            settings.volume,
+            settings.muted
+        );
         return;
     }
 
@@ -130,5 +141,10 @@ pub fn save(flash: &mut Flash<'_, FLASH, Blocking, FLASH_SIZE>, settings: &Persi
         return;
     }
 
-    defmt::info!("Settings saved to slot {}: volume={}, muted={}", next_idx, settings.volume, settings.muted);
+    defmt::info!(
+        "Settings saved to slot {}: volume={}, muted={}",
+        next_idx,
+        settings.volume,
+        settings.muted
+    );
 }

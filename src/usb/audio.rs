@@ -21,7 +21,7 @@ pub struct UsbAudioConfig {
 impl Default for UsbAudioConfig {
     fn default() -> Self {
         Self {
-            sample_rate: 96_000,
+            sample_rate: crate::hw::pins::audio::SAMPLE_RATE,
             bit_depth: SampleWidth::Width3Byte, // 24-bit
             // At 96kHz, 24-bit stereo: 96 samples/ms * 2 channels * 3 bytes = 576 bytes
             // Add margin for clock drift: 640 bytes

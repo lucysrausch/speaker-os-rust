@@ -67,7 +67,7 @@ impl Default for AppState {
             source: AudioSource::None,
             source_locked: false,
             signal_status: SignalStatus::NoSignal,
-            sample_rate: 96000,
+            sample_rate: crate::hw::pins::audio::SAMPLE_RATE,
             eq_enabled: false,
             level_left: 0,
             level_right: 0,

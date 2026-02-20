@@ -1,6 +1,7 @@
 //! Pin assignments for OtterAmp DSP (RP2350A)
 //!
 //! GPIO mapping from PINOUT.md with hardware errata corrections.
+//! This file is the SINGLE source of truth for all GPIO and hardware config.
 //!
 //! ## Hardware Errata (Rev 1.0)
 //!
@@ -13,104 +14,78 @@
 //!
 //! Rev 1.1 will fix these in hardware.
 
-use embassy_rp::peripherals::*;
+/// Internal macro: generates `BoardPins` struct + `board_pins!` constructor
+/// from a single pin list so GPIO assignments are defined in exactly one place.
+macro_rules! define_board_pins {
+    ( $( $field:ident : $pin:ident ),* $(,)? ) => {
+        /// All board pins, extracted from `Peripherals` via the `board_pins!` macro.
+        pub struct BoardPins {
+            $( pub $field: embassy_rp::Peri<'static, embassy_rp::peripherals::$pin>, )*
+        }
 
-/// Pin numbers as constants for reference
-/// Note: Comments indicate Rev 1.0 bodge status
-pub mod gpio {
-    // I2C0 - OLED displays
-    // BODGE Rev1.0: Swap GPIO0↔GPIO1 traces at OLED connector
-    pub const I2C0_SDA: u8 = 0;
-    pub const I2C0_SCL: u8 = 1;
-
-    // S/PDIF
-    pub const SPDIF_TX: u8 = 2;
-    pub const SPDIF_RX: u8 = 3;
-    pub const SPDIF_SEL: u8 = 4;
-
-    // External GPIO
-    pub const EXT_GPIO: u8 = 5;
-
-    // Debug UART
-    pub const UART_TX: u8 = 6;
-    pub const UART_RX: u8 = 7;
-
-    // Rotary encoder
-    pub const ENC_BTN: u8 = 8;
-    pub const ENC_A: u8 = 9;
-    pub const ENC_B: u8 = 10;
-
-    // Status LEDs
-    pub const LED1: u8 = 11;
-    pub const LED0: u8 = 12;
-
-    // I2C1 - TAS5830 amplifier
-    // BODGE Rev1.0: Bridge GPIO13→GPIO15 (GPIO13 only supports I2C0!)
-    // After bodge: GPIO14=SDA (correct), GPIO15=SCL (bridged from GPIO13)
-    pub const I2C1_SCL: u8 = 15; // Was 13 in schematic, bodged to 15
-    pub const I2C1_SDA: u8 = 14; // Correct
-    pub const I2C1_INT: u8 = 13; // Was 15 in schematic, now GPIO13 (I2C1.INT sacrificed in Rev1.0)
-
-    // Amplifier control
-    pub const AMP_FLT: u8 = 16;
-    pub const AMP_PDN: u8 = 17;
-    pub const AMP_MUTE: u8 = 18;
-
-    // I2S to TAS5830 amplifier (PIO)
-    pub const AMP_BCLK: u8 = 19;
-    pub const AMP_WCLK: u8 = 20;
-    pub const AMP_DATA: u8 = 21;
-    pub const AMP_RTN: u8 = 22;
-
-    // I2S from PCM1822 ADC (PIO)
-    pub const ADC_BCLK: u8 = 23;
-    pub const ADC_WCLK: u8 = 24;
-    pub const ADC_DATA: u8 = 25;
+        /// Destructure embassy `Peripherals` into named board pins.
+        /// Usage: `let pins = board_pins!(p);`
+        #[macro_export]
+        macro_rules! board_pins {
+            ($p:ident) => {{
+                $crate::hw::pins::BoardPins {
+                    $( $field: $p.$pin, )*
+                }
+            }};
+        }
+    };
 }
 
-/// Type aliases for embassy-rp peripheral pins
-/// These reflect the ACTUAL pin usage after Rev 1.0 bodges
-pub mod peripherals {
-    use embassy_rp::peripherals::*;
-
-    // I2C0 - OLED (after bodge: GPIO0=SDA, GPIO1=SCL)
-    pub type I2c0Sda = PIN_0;
-    pub type I2c0Scl = PIN_1;
-
-    // S/PDIF
-    pub type SpdifTx = PIN_2;
-    pub type SpdifRx = PIN_3;
-    pub type SpdifSel = PIN_4;
-
-    // Rotary encoder
-    pub type EncBtn = PIN_8;
-    pub type EncA = PIN_9;
-    pub type EncB = PIN_10;
-
-    // Status LEDs
-    pub type Led1 = PIN_11;
-    pub type Led0 = PIN_12;
-
-    // I2C1 - TAS5830 (after bodge: GPIO14=SDA, GPIO15=SCL)
-    pub type I2c1Sda = PIN_14;
-    pub type I2c1Scl = PIN_15;
-    // Note: I2C1.INT on GPIO13 not usable in Rev1.0 (used for SCL bodge source)
-
-    // Amplifier control
-    pub type AmpFlt = PIN_16;
-    pub type AmpPdn = PIN_17;
-    pub type AmpMute = PIN_18;
-
-    // I2S to amplifier
-    pub type AmpBclk = PIN_19;
-    pub type AmpWclk = PIN_20;
-    pub type AmpData = PIN_21;
-    pub type AmpRtn = PIN_22;
-
-    // I2S from ADC
-    pub type AdcBclk = PIN_23;
-    pub type AdcWclk = PIN_24;
-    pub type AdcData = PIN_25;
+// GPIO Pin Map (active pins extracted, others unused in software)
+//
+// | GPIO | Function         | Notes                                          |
+// |------|------------------|-------------------------------------------------|
+// |  0   | I2C0 SDA (OLED)  | BODGE Rev1.0: GPIO0↔GPIO1 swapped at connector |
+// |  1   | I2C0 SCL (OLED)  | BODGE Rev1.0: GPIO0↔GPIO1 swapped at connector |
+// |  2   | S/PDIF TX        | (unused in software)                            |
+// |  3   | S/PDIF RX        |                                                 |
+// |  4   | S/PDIF SEL       | (unused in software)                            |
+// |  5   | External GPIO    | (unused in software)                            |
+// |  6   | Debug UART TX    | (unused in software)                            |
+// |  7   | Debug UART RX    | (unused in software)                            |
+// |  8   | Encoder button   |                                                 |
+// |  9   | Encoder A        |                                                 |
+// | 10   | Encoder B        |                                                 |
+// | 11   | LED1             | (unused in software)                            |
+// | 12   | LED0             |                                                 |
+// | 13   | I2C1 INT         | BODGE Rev1.0: was SCL, sacrificed for bodge     |
+// | 14   | I2C1 SDA (amp)   |                                                 |
+// | 15   | I2C1 SCL (amp)   | BODGE Rev1.0: bridged from GPIO13               |
+// | 16   | AMP_FLT          | (unused in software)                            |
+// | 17   | AMP_PDN          |                                                 |
+// | 18   | AMP_MUTE         |                                                 |
+// | 19   | AMP I2S BCLK     |                                                 |
+// | 20   | AMP I2S WCLK     |                                                 |
+// | 21   | AMP I2S DATA     |                                                 |
+// | 22   | AMP I2S RTN      | (unused in software)                            |
+// | 23   | ADC I2S BCLK     |                                                 |
+// | 24   | ADC I2S WCLK     |                                                 |
+// | 25   | ADC I2S DATA     |                                                 |
+// | 29   | USB VBUS sense   | Via 5.1k:10k voltage divider                    |
+define_board_pins! {
+    i2c0_sda: PIN_0,  // BODGE Rev1.0: swapped with SCL
+    i2c0_scl: PIN_1,  // BODGE Rev1.0: swapped with SDA
+    spdif_rx: PIN_3,
+    enc_btn:  PIN_8,
+    enc_a:    PIN_9,
+    enc_b:    PIN_10,
+    led0:     PIN_12,
+    i2c1_sda: PIN_14,
+    i2c1_scl: PIN_15, // BODGE Rev1.0: bridged from GPIO13
+    amp_pdn:  PIN_17,
+    amp_mute: PIN_18,
+    amp_bclk: PIN_19,
+    amp_wclk: PIN_20,
+    amp_data: PIN_21,
+    adc_bclk: PIN_23,
+    adc_wclk: PIN_24,
+    adc_data: PIN_25,
+    usb_vbus: PIN_29,
 }
 
 /// I2C addresses
@@ -124,8 +99,8 @@ pub mod i2c_addr {
 
 /// I2C bus speeds
 pub mod i2c_freq {
-    /// Standard mode for OLED (400kHz)
-    pub const OLED_HZ: u32 = 100_000;
+    /// Fast mode for OLED (400kHz)
+    pub const OLED_HZ: u32 = 400_000;
 
     /// Fast mode for TAS5830 (1MHz supported, using 400kHz for reliability)
     pub const AMP_HZ: u32 = 400_000;
@@ -133,8 +108,11 @@ pub mod i2c_freq {
 
 /// Audio configuration
 pub mod audio {
-    /// Sample rate in Hz
+    /// I2S output sample rate in Hz
     pub const SAMPLE_RATE: u32 = 96_000;
+
+    /// USB audio input sample rate in Hz
+    pub const USB_SAMPLE_RATE: u32 = 96_000;
 
     /// Bit depth per channel
     pub const BIT_DEPTH: u8 = 32;
@@ -147,18 +125,4 @@ pub mod audio {
 
     /// S/PDIF uses 128x oversampling for the biphase encoding
     pub const SPDIF_BCLK_FREQ: u32 = SAMPLE_RATE * 128;
-}
-
-/// PIO state machine assignments
-pub mod pio {
-    /// PIO0 is used for S/PDIF
-    pub const SPDIF_PIO: u8 = 0;
-    pub const SPDIF_RX_SM: u8 = 0;
-    pub const SPDIF_TX_SM: u8 = 1;
-
-    /// PIO1 is used for I2S
-    pub const I2S_PIO: u8 = 1;
-    pub const I2S_CONTROLLER_SM: u8 = 0; // Clock generation
-    pub const I2S_ADC_SM: u8 = 1; // ADC input
-    pub const I2S_AMP_SM: u8 = 2; // Amplifier output
 }

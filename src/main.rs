@@ -57,7 +57,7 @@ use crate::drivers::{RotaryEncoder, Tas5830};
 use crate::gui::display::Sh1106;
 use crate::gui::screens::{AppState, BootScreen, HomeScreen};
 use crate::gui::widgets::{AudioSource, SignalStatus};
-use crate::hw::pins::i2c_addr;
+use crate::hw::pins::{audio as audio_cfg, i2c_addr, i2c_freq};
 
 // RP2350 boot block - required for the chip to boot
 #[unsafe(link_section = ".start_block")]
@@ -109,7 +109,7 @@ static PENDING_I2S_RATE: AtomicU32 = AtomicU32::new(0);
 
 /// Current I2S output sample rate
 /// Core 1 writes after rate change, Core 0 reads for DSP coefficient selection
-static CURRENT_I2S_RATE: AtomicU32 = AtomicU32::new(96_000);
+static CURRENT_I2S_RATE: AtomicU32 = AtomicU32::new(audio_cfg::SAMPLE_RATE);
 
 /// Peak audio levels (absolute value, updated by Core 1, read/reset by Core 0)
 /// Core 1 uses fetch_max per sample; Core 0 uses swap(0) to read and reset atomically.
@@ -144,11 +144,11 @@ fn log_meter(raw: u32) -> u8 {
 /// S/PDIF FIFO buffer (static allocation)
 static SPDIF_FIFO: StaticCell<[u32; SPDIF_RX_FIFO_SIZE]> = StaticCell::new();
 
-/// I2S output sample rate (fixed at 96kHz)
-const I2S_SAMPLE_RATE: u32 = 96_000;
+/// I2S output sample rate
+const I2S_SAMPLE_RATE: u32 = audio_cfg::SAMPLE_RATE;
 
-/// USB audio input sample rate (clock recovery handles drift)
-const USB_SAMPLE_RATE: u32 = 96_000;
+/// USB audio input sample rate
+const USB_SAMPLE_RATE: u32 = audio_cfg::USB_SAMPLE_RATE;
 
 /// State update messages
 #[derive(Debug, Clone)]
@@ -164,13 +164,14 @@ pub enum AppStateUpdate {
 async fn main(spawner: Spawner) {
     defmt::info!("OtterAmp DSP starting...");
 
-    let p = embassy_rp::init(Default::default());
+    let mut p = embassy_rp::init(Default::default());
+    let pins = board_pins!(p);
 
     // Drive TAS5830 PDN low immediately to ensure clean reset on reflash.
     // Without this, the pin floats high during boot and the amp may be in
     // an unknown state by the time init() runs.
-    let amp_pdn = Output::new(p.PIN_17, Level::Low);
-    let amp_mute = Output::new(p.PIN_18, Level::Low);
+    let amp_pdn = Output::new(pins.amp_pdn, Level::Low);
+    let amp_mute = Output::new(pins.amp_mute, Level::Low);
 
     // Load saved settings from flash
     let mut flash = Flash::<_, Blocking, { settings::FLASH_SIZE }>::new_blocking(p.FLASH);
@@ -178,28 +179,32 @@ async fn main(spawner: Spawner) {
     INITIAL_VOLUME.store(saved_settings.volume, Ordering::Relaxed);
     INITIAL_MUTED.store(saved_settings.muted, Ordering::Relaxed);
 
-    // Status LED (GPIO12 on custom board - LED0)
-    let mut led = Output::new(p.PIN_12, Level::Low);
+    // Status LED
+    let mut led = Output::new(pins.led0, Level::Low);
     led.set_high();
 
     defmt::info!("Initializing I2C buses...");
 
-    // I2C0 for OLED display (GPIO0=SDA, GPIO1=SCL after bodge)
+    // I2C0 for OLED display
+    let mut i2c0_cfg = i2c::Config::default();
+    i2c0_cfg.frequency = i2c_freq::OLED_HZ;
     let i2c0 = I2c::new_async(
         p.I2C0,
-        p.PIN_1, // SCL
-        p.PIN_0, // SDA
+        pins.i2c0_scl,
+        pins.i2c0_sda,
         Irqs,
-        i2c::Config::default(),
+        i2c0_cfg,
     );
 
-    // I2C1 for TAS5830 amplifier (GPIO14=SDA, GPIO15=SCL after bodge)
+    // I2C1 for TAS5830 amplifier
+    let mut i2c1_cfg = i2c::Config::default();
+    i2c1_cfg.frequency = i2c_freq::AMP_HZ;
     let i2c1 = I2c::new_async(
         p.I2C1,
-        p.PIN_15, // SCL
-        p.PIN_14, // SDA
+        pins.i2c1_scl,
+        pins.i2c1_sda,
         Irqs,
-        i2c::Config::default(),
+        i2c1_cfg,
     );
 
     defmt::info!("Initializing OLED display...");
@@ -242,10 +247,10 @@ async fn main(spawner: Spawner) {
     let i2s_tx = I2sTx::new(
         &mut pio1.common,
         pio1.sm0,
-        p.PIN_19, // AMP_BCLK
-        p.PIN_20, // AMP_WCLK
-        p.PIN_21, // AMP_DATA
-        I2S_SAMPLE_RATE,
+        pins.amp_bclk,
+        pins.amp_wclk,
+        pins.amp_data,
+        audio_cfg::SAMPLE_RATE,
     );
 
     // I2S clocks are now running — transition TAS5830 to PLAY and unmute
@@ -264,10 +269,10 @@ async fn main(spawner: Spawner) {
     let i2s_rx = I2sRx::new(
         &mut pio1.common,
         pio1.sm1,
-        p.PIN_23, // ADC_BCLK
-        p.PIN_24, // ADC_WCLK
-        p.PIN_25, // ADC_DATA
-        I2S_SAMPLE_RATE,
+        pins.adc_bclk,
+        pins.adc_wclk,
+        pins.adc_data,
+        audio_cfg::SAMPLE_RATE,
     );
 
     // Store I2S TX and RX in statics
@@ -302,7 +307,7 @@ async fn main(spawner: Spawner) {
 
     // Spawn S/PDIF receiver task with full PIO access for rate switching
     spawner
-        .spawn(spdif_task(pio0, p.PIN_3, p.DMA_CH0, spdif_fifo))
+        .spawn(spdif_task(pio0, pins.spdif_rx, p.DMA_CH0, spdif_fifo))
         .unwrap();
 
     boot_screen.set_progress(60, "Audio ready");
@@ -318,9 +323,9 @@ async fn main(spawner: Spawner) {
 
     // Initialize rotary encoder
     let encoder = RotaryEncoder::new(
-        p.PIN_10, // ENC_A
-        p.PIN_9,  // ENC_B
-        p.PIN_8,  // ENC_BTN
+        pins.enc_b,
+        pins.enc_a,
+        pins.enc_btn,
     );
 
     // Spawn the encoder task
@@ -329,8 +334,8 @@ async fn main(spawner: Spawner) {
     // Spawn the USB task
     spawner.spawn(usb_task(p.USB)).unwrap();
 
-    // USB VBUS sense pin (GPIO29 via 5.1k:10k voltage divider)
-    let usb_vbus = embassy_rp::gpio::Input::new(p.PIN_29, embassy_rp::gpio::Pull::None);
+    // USB VBUS sense
+    let usb_vbus = embassy_rp::gpio::Input::new(pins.usb_vbus, embassy_rp::gpio::Pull::None);
 
     defmt::info!("Boot complete!");
     boot_screen.set_progress(100, "Ready!");

@@ -13,7 +13,7 @@ use embedded_hal_async::i2c::I2c;
 use micromath::F32Ext;
 
 /// TAS5830 I2C address (configured by ADDR pin)
-pub const DEFAULT_ADDRESS: u8 = 0x60;
+pub const DEFAULT_ADDRESS: u8 = crate::hw::pins::i2c_addr::TAS5830;
 
 /// Key register addresses (Page 0, Book 0)
 #[allow(dead_code)]
