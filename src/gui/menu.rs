@@ -258,7 +258,7 @@ pub fn create_source_menu() -> Menu {
     let mut menu = Menu::new("Source");
     menu.add_item(MenuItem::new(
         "Auto",
-        MenuAction::SelectSource(AudioSource::None),
+        MenuAction::SelectSource(AudioSource::Auto),
     ));
     menu.add_item(MenuItem::new(
         "Line In",

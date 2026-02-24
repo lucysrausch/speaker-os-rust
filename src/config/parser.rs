@@ -233,6 +233,16 @@ fn parse_eq_band(band: u8, key: &[u8], value: &[u8], config: &mut DspConfigFile)
                 freq_hz: 1000.0,
                 q: 0.707,
             }
+        } else if eq_bytes(value, b"lr24_low_pass") {
+            FilterType::LR24LowPass {
+                freq_hz: 1000.0,
+                gain_db: 0.0,
+            }
+        } else if eq_bytes(value, b"lr24_high_pass") {
+            FilterType::LR24HighPass {
+                freq_hz: 1000.0,
+                gain_db: 0.0,
+            }
         } else if eq_bytes(value, b"low_shelf") {
             FilterType::LowShelf {
                 freq_hz: 1000.0,
@@ -310,6 +320,8 @@ fn set_filter_freq(filter: &mut FilterType, f: f32) {
         FilterType::Peaking { freq_hz, .. }
         | FilterType::LowPass { freq_hz, .. }
         | FilterType::HighPass { freq_hz, .. }
+        | FilterType::LR24LowPass { freq_hz, .. }
+        | FilterType::LR24HighPass { freq_hz, .. }
         | FilterType::LowShelf { freq_hz, .. }
         | FilterType::HighShelf { freq_hz, .. }
         | FilterType::BandPass { freq_hz, .. }
@@ -322,6 +334,8 @@ fn set_filter_freq(filter: &mut FilterType, f: f32) {
 fn set_filter_gain(filter: &mut FilterType, g: f32) {
     match filter {
         FilterType::Peaking { gain_db, .. }
+        | FilterType::LR24LowPass { gain_db, .. }
+        | FilterType::LR24HighPass { gain_db, .. }
         | FilterType::LowShelf { gain_db, .. }
         | FilterType::HighShelf { gain_db, .. } => *gain_db = g,
         _ => {}
@@ -338,7 +352,7 @@ fn set_filter_q(filter: &mut FilterType, q_val: f32) {
         | FilterType::BandPass { q, .. }
         | FilterType::Notch { q, .. }
         | FilterType::AllPass { q, .. } => *q = q_val,
-        FilterType::Bypass => {}
+        FilterType::Bypass | FilterType::LR24LowPass { .. } | FilterType::LR24HighPass { .. } => {}
     }
 }
 
@@ -386,8 +400,14 @@ impl<'a> Iterator for LineIter<'a> {
 
 /// Trim leading and trailing ASCII whitespace from a byte slice.
 fn trim(s: &[u8]) -> &[u8] {
-    let start = s.iter().position(|&b| b != b' ' && b != b'\t').unwrap_or(s.len());
-    let end = s.iter().rposition(|&b| b != b' ' && b != b'\t').map_or(start, |p| p + 1);
+    let start = s
+        .iter()
+        .position(|&b| b != b' ' && b != b'\t')
+        .unwrap_or(s.len());
+    let end = s
+        .iter()
+        .rposition(|&b| b != b' ' && b != b'\t')
+        .map_or(start, |p| p + 1);
     &s[start..end]
 }
 
@@ -438,11 +458,7 @@ fn parse_i16(s: &[u8]) -> Option<i16> {
     if s.is_empty() {
         return None;
     }
-    let (neg, start) = if s[0] == b'-' {
-        (true, 1)
-    } else {
-        (false, 0)
-    };
+    let (neg, start) = if s[0] == b'-' { (true, 1) } else { (false, 0) };
 
     let mut result: i32 = 0;
     for &b in &s[start..] {
@@ -470,11 +486,7 @@ fn parse_f32(s: &[u8]) -> Option<f32> {
         return None;
     }
 
-    let (neg, start) = if s[0] == b'-' {
-        (true, 1)
-    } else {
-        (false, 0)
-    };
+    let (neg, start) = if s[0] == b'-' { (true, 1) } else { (false, 0) };
 
     let mut integer_part: u32 = 0;
     let mut frac_part: u32 = 0;

@@ -169,7 +169,11 @@ pub fn load_and_build_config(
             config_file.to_dsp_config()
         }
         Err(e) => {
-            defmt::warn!("Config parse error at line {}: {:?}, using defaults", e.line, e.kind);
+            defmt::warn!(
+                "Config parse error at line {}: {:?}, using defaults",
+                e.line,
+                e.kind
+            );
             DspConfigFile::default().to_dsp_config()
         }
     }

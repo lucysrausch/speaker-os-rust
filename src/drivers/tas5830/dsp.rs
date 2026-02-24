@@ -156,6 +156,40 @@ impl BiquadCoeffs {
         Self::normalise(b0, b1, b2, a0, a1, a2)
     }
 
+    /// LR24 low-pass filter.
+    pub fn lr24_low_pass(freq_hz: f32, gain_db: f32, sample_rate: f32) -> Self {
+        let w0 = 2.0 * PI * freq_hz / sample_rate;
+        let sin_w0 = w0.sin();
+        let cos_w0 = w0.cos();
+        let alpha = sin_w0 / (2.0 * (1.0 / (2.0).sqrt()));
+
+        let a0 = 1.0 + alpha;
+        let a1 = -(2.0 * cos_w0) / a0;
+        let a2 = (1.0 - alpha) / a0;
+        let b1 = (1.0 - cos_w0) / a0 * (10.0.powf(gain_db / 20.0));
+        let b0: f32 = b1 / 2.0;
+        let b2 = b0;
+
+        Self::normalise(b0, b1, b2, a0, a1, a2)
+    }
+
+    /// LR24 high-pass filter.
+    pub fn lr24_high_pass(freq_hz: f32, gain_db: f32, sample_rate: f32) -> Self {
+        let w0 = 2.0 * PI * freq_hz / sample_rate;
+        let sin_w0 = w0.sin();
+        let cos_w0 = w0.cos();
+        let alpha = sin_w0 / (2.0 * (1.0 / (2.0).sqrt()));
+
+        let a0 = 1.0 + alpha;
+        let a1 = -(2.0 * cos_w0) / a0;
+        let a2 = (1.0 - alpha) / a0;
+        let b1 = -(1.0 + cos_w0) / a0 * 10.0.powf(gain_db / 20.0);
+        let b0 = -b1 / 2.0;
+        let b2 = b0;
+
+        Self::normalise(b0, b1, b2, a0, a1, a2)
+    }
+
     /// Low-shelf filter.
     pub fn low_shelf(freq_hz: f32, gain_db: f32, q: f32, sample_rate: f32) -> Self {
         let a = (10.0f32).powf(gain_db / 40.0);
@@ -486,9 +520,25 @@ pub enum FilterType {
         q: f32,
     },
     /// Second-order Butterworth low-pass
-    LowPass { freq_hz: f32, q: f32 },
+    LowPass {
+        freq_hz: f32,
+        q: f32,
+    },
     /// Second-order Butterworth high-pass
-    HighPass { freq_hz: f32, q: f32 },
+    HighPass {
+        freq_hz: f32,
+        q: f32,
+    },
+    // Linkwitz-Riley low pass
+    LR24LowPass {
+        freq_hz: f32,
+        gain_db: f32,
+    },
+    // Linkwitz-Riley high pass
+    LR24HighPass {
+        freq_hz: f32,
+        gain_db: f32,
+    },
     /// Low-shelf
     LowShelf {
         freq_hz: f32,
@@ -502,11 +552,20 @@ pub enum FilterType {
         q: f32,
     },
     /// Band-pass (constant-skirt)
-    BandPass { freq_hz: f32, q: f32 },
+    BandPass {
+        freq_hz: f32,
+        q: f32,
+    },
     /// Notch (band-reject)
-    Notch { freq_hz: f32, q: f32 },
+    Notch {
+        freq_hz: f32,
+        q: f32,
+    },
     /// All-pass
-    AllPass { freq_hz: f32, q: f32 },
+    AllPass {
+        freq_hz: f32,
+        q: f32,
+    },
     /// No filtering (passthrough)
     Bypass,
 }
@@ -522,6 +581,12 @@ impl FilterType {
             } => BiquadCoeffs::peaking(freq_hz, gain_db, q, sample_rate),
             Self::LowPass { freq_hz, q } => BiquadCoeffs::low_pass(freq_hz, q, sample_rate),
             Self::HighPass { freq_hz, q } => BiquadCoeffs::high_pass(freq_hz, q, sample_rate),
+            Self::LR24LowPass { freq_hz, gain_db } => {
+                BiquadCoeffs::lr24_low_pass(freq_hz, gain_db, sample_rate)
+            }
+            Self::LR24HighPass { freq_hz, gain_db } => {
+                BiquadCoeffs::lr24_high_pass(freq_hz, gain_db, sample_rate)
+            }
             Self::LowShelf {
                 freq_hz,
                 gain_db,

@@ -23,6 +23,8 @@ pub enum AudioSource {
     Usb,
     /// No active source
     None,
+    /// Auto source
+    Auto,
 }
 
 impl AudioSource {
@@ -32,6 +34,7 @@ impl AudioSource {
             AudioSource::Spdif => "S/PDIF",
             AudioSource::Usb => "USB",
             AudioSource::None => "---",
+            AudioSource::Auto => "AUTO",
         }
     }
 
@@ -41,6 +44,7 @@ impl AudioSource {
             AudioSource::Spdif => "S/PDIF",
             AudioSource::Usb => "USB",
             AudioSource::None => "---",
+            AudioSource::Auto => "AUTO",
         }
     }
 }

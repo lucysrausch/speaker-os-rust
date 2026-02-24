@@ -106,10 +106,39 @@ static SPDIF_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Active audio source (0=LineIn, 1=Spdif, 2=Usb)
 /// Managed by main loop based on connection events (last connected wins).
 static ACTIVE_SOURCE: AtomicU8 = AtomicU8::new(SOURCE_LINEIN);
+static SOURCE_MODE: AtomicU8 = AtomicU8::new(SOURCE_AUTO);
 
 const SOURCE_LINEIN: u8 = 0;
 const SOURCE_SPDIF: u8 = 1;
 const SOURCE_USB: u8 = 2;
+const SOURCE_AUTO: u8 = 3;
+
+// Helper functions for setting active source
+fn set_active_source(app_state: &mut AppState, new_source: u8) {
+    ACTIVE_SOURCE.store(new_source, Ordering::Release);
+    let (new_audio_source, usb_sample_rate) = match new_source {
+        SOURCE_LINEIN => (AudioSource::LineIn, I2S_SAMPLE_RATE),
+        SOURCE_SPDIF => (AudioSource::Spdif, I2S_SAMPLE_RATE),
+        SOURCE_USB => (AudioSource::Usb, USB_SAMPLE_RATE),
+        _ => (AudioSource::None, I2S_SAMPLE_RATE),
+    };
+    app_state.source = new_audio_source;
+    PENDING_I2S_RATE.store(usb_sample_rate, Ordering::Release);
+    app_state.sample_rate = usb_sample_rate;
+}
+
+fn set_active_source_if_auto(app_state: &mut AppState, new_source: u8) -> bool {
+    if SOURCE_MODE.load(Ordering::Relaxed) == SOURCE_AUTO {
+        set_active_source(app_state, new_source);
+        true
+    } else {
+        false
+    }
+}
+
+fn get_active_source() -> u8 {
+    return ACTIVE_SOURCE.load(Ordering::Relaxed);
+}
 
 /// Pending I2S sample rate change (0 = no change pending)
 /// Core 0 writes, Core 1 reads and clears
@@ -219,24 +248,12 @@ async fn main(spawner: Spawner) {
     // I2C0 for OLED display
     let mut i2c0_cfg = i2c::Config::default();
     i2c0_cfg.frequency = i2c_freq::OLED_HZ;
-    let i2c0 = I2c::new_async(
-        p.I2C0,
-        pins.i2c0_scl,
-        pins.i2c0_sda,
-        Irqs,
-        i2c0_cfg,
-    );
+    let i2c0 = I2c::new_async(p.I2C0, pins.i2c0_scl, pins.i2c0_sda, Irqs, i2c0_cfg);
 
     // I2C1 for TAS5830 amplifier
     let mut i2c1_cfg = i2c::Config::default();
     i2c1_cfg.frequency = i2c_freq::AMP_HZ;
-    let i2c1 = I2c::new_async(
-        p.I2C1,
-        pins.i2c1_scl,
-        pins.i2c1_sda,
-        Irqs,
-        i2c1_cfg,
-    );
+    let i2c1 = I2c::new_async(p.I2C1, pins.i2c1_scl, pins.i2c1_sda, Irqs, i2c1_cfg);
 
     defmt::info!("Initializing OLED display...");
 
@@ -247,10 +264,12 @@ async fn main(spawner: Spawner) {
     }
 
     // Clear display (removes random garbage on power-up)
+    defmt::info!("Clear display...");
     display.clear_all(embedded_graphics::pixelcolor::BinaryColor::Off);
     let _ = display.flush_all().await;
 
     // Show boot screen
+    defmt::info!("Disply boot screen...");
     let mut boot_screen = BootScreen::new();
     let app_state = AppState::default();
     let _ = boot_screen.draw(&mut display, &app_state);
@@ -303,9 +322,7 @@ async fn main(spawner: Spawner) {
         // Create virtual FAT12 filesystem backed by flash
         fn flash_read_config(buf: &mut [u8]) -> u16 {
             // SAFETY: Flash is only accessed from this task in config mode
-            let flash = unsafe {
-                &mut *core::ptr::addr_of_mut!(CONFIG_MODE_FLASH)
-            };
+            let flash = unsafe { &mut *core::ptr::addr_of_mut!(CONFIG_MODE_FLASH) };
             if let Some(flash) = flash.as_mut() {
                 if let Some(data) = config::flash::read_config(flash) {
                     let len = data.len().min(buf.len());
@@ -321,9 +338,7 @@ async fn main(spawner: Spawner) {
         }
 
         fn flash_write_config(data: &[u8]) {
-            let flash = unsafe {
-                &mut *core::ptr::addr_of_mut!(CONFIG_MODE_FLASH)
-            };
+            let flash = unsafe { &mut *core::ptr::addr_of_mut!(CONFIG_MODE_FLASH) };
             if let Some(flash) = flash.as_mut() {
                 config::flash::write_config(flash, data);
             }
@@ -335,10 +350,7 @@ async fn main(spawner: Spawner) {
             CONFIG_MODE_FLASH = Some(flash);
         }
 
-        let mut vfs = usb_msc::fat12::VirtualFat12::new(
-            flash_read_config,
-            flash_write_config,
-        );
+        let mut vfs = usb_msc::fat12::VirtualFat12::new(flash_read_config, flash_write_config);
 
         defmt::info!("USB MSC ready, waiting for host...");
 
@@ -381,6 +393,19 @@ async fn main(spawner: Spawner) {
 
     // Load DSP config from flash while I2S isn't running yet
     let dsp_config = config::load_and_build_config(&mut flash);
+
+    defmt::info!("DSP config bands...");
+
+    for band in dsp_config.eq_bands {
+        defmt::info!("{}", band);
+    }
+
+    defmt::info!(
+        "DSP volumes: {}, {}, {}",
+        dsp_config.channel_volume,
+        dsp_config.digital_volume,
+        dsp_config.analog_gain
+    );
 
     // Initialize I2S receiver for line-in ADC (PIO1 SM1)
     let i2s_rx = I2sRx::new(
@@ -459,11 +484,7 @@ async fn main(spawner: Spawner) {
     Timer::after(Duration::from_millis(500)).await;
 
     // Initialize rotary encoder
-    let encoder = RotaryEncoder::new(
-        pins.enc_b,
-        pins.enc_a,
-        pins.enc_btn,
-    );
+    let encoder = RotaryEncoder::new(pins.enc_b, pins.enc_a, pins.enc_btn);
 
     // Spawn the encoder task
     spawner.spawn(encoder_task(encoder)).unwrap();
@@ -523,10 +544,7 @@ async fn main(spawner: Spawner) {
     let mut menu_rotate_accum: i8 = 0; // Accumulator to reduce menu rotation sensitivity
 
     // If USB is already connected at boot, start with USB
-    if prev_vbus_present {
-        ACTIVE_SOURCE.store(SOURCE_USB, Ordering::Release);
-        app_state.source = AudioSource::Usb;
-        PENDING_I2S_RATE.store(USB_SAMPLE_RATE, Ordering::Release);
+    if prev_vbus_present && set_active_source_if_auto(&mut app_state, SOURCE_USB) {
         let _ = home_screen.draw(&mut display, &app_state);
         let _ = display.flush_all().await;
         defmt::info!("USB connected at boot");
@@ -540,9 +558,10 @@ async fn main(spawner: Spawner) {
         let mut source_changed = false;
 
         // S/PDIF rising edge: signal just appeared → switch to S/PDIF
-        if spdif_active && !prev_spdif_active {
-            ACTIVE_SOURCE.store(SOURCE_SPDIF, Ordering::Release);
-            app_state.source = AudioSource::Spdif;
+        if spdif_active
+            && !prev_spdif_active
+            && set_active_source_if_auto(&mut app_state, SOURCE_SPDIF)
+        {
             // Signal status will be updated by metering logic below
             // Sample rate is updated via SampleRateChanged from spdif_task
             source_changed = true;
@@ -551,44 +570,29 @@ async fn main(spawner: Spawner) {
 
         // S/PDIF falling edge: signal just lost → fallback
         if !spdif_active && prev_spdif_active {
-            if vbus_present {
-                ACTIVE_SOURCE.store(SOURCE_USB, Ordering::Release);
-                PENDING_I2S_RATE.store(USB_SAMPLE_RATE, Ordering::Release);
-                app_state.source = AudioSource::Usb;
-                app_state.sample_rate = USB_SAMPLE_RATE;
+            if vbus_present && set_active_source_if_auto(&mut app_state, SOURCE_USB) {
                 defmt::info!("Source: USB (S/PDIF lost, USB connected)");
-            } else {
-                ACTIVE_SOURCE.store(SOURCE_LINEIN, Ordering::Release);
-                PENDING_I2S_RATE.store(I2S_SAMPLE_RATE, Ordering::Release);
-                app_state.source = AudioSource::LineIn;
-                app_state.sample_rate = I2S_SAMPLE_RATE;
+            } else if set_active_source_if_auto(&mut app_state, SOURCE_LINEIN) {
                 defmt::info!("Source: Line-in (S/PDIF lost)");
             }
             source_changed = true;
         }
 
         // USB VBUS rising edge: cable just plugged in → switch to USB
-        if vbus_present && !prev_vbus_present {
-            ACTIVE_SOURCE.store(SOURCE_USB, Ordering::Release);
-            PENDING_I2S_RATE.store(USB_SAMPLE_RATE, Ordering::Release);
-            app_state.source = AudioSource::Usb;
-            app_state.sample_rate = USB_SAMPLE_RATE;
+        if vbus_present
+            && !prev_vbus_present
+            && set_active_source_if_auto(&mut app_state, SOURCE_USB)
+        {
             source_changed = true;
             defmt::info!("Source: USB (cable connected)");
         }
 
         // USB VBUS falling edge: cable just unplugged → fallback
         if !vbus_present && prev_vbus_present {
-            if spdif_active {
-                ACTIVE_SOURCE.store(SOURCE_SPDIF, Ordering::Release);
-                app_state.source = AudioSource::Spdif;
+            if spdif_active && set_active_source_if_auto(&mut app_state, SOURCE_SPDIF) {
                 // Keep current S/PDIF sample rate (already set by spdif_task)
                 defmt::info!("Source: S/PDIF (USB unplugged)");
-            } else {
-                ACTIVE_SOURCE.store(SOURCE_LINEIN, Ordering::Release);
-                PENDING_I2S_RATE.store(I2S_SAMPLE_RATE, Ordering::Release);
-                app_state.source = AudioSource::LineIn;
-                app_state.sample_rate = I2S_SAMPLE_RATE;
+            } else if set_active_source_if_auto(&mut app_state, SOURCE_LINEIN) {
                 defmt::info!("Source: Line-in (USB unplugged)");
             }
             source_changed = true;
@@ -640,8 +644,7 @@ async fn main(spawner: Spawner) {
                 AppStateUpdate::EncoderRotate(dir) => {
                     if current_screen == ScreenId::Home {
                         // Volume: pass through every tick for fine control
-                        pending_action =
-                            home_screen.on_encoder_rotate(dir, &mut app_state);
+                        pending_action = home_screen.on_encoder_rotate(dir, &mut app_state);
                     } else {
                         // Menus: accumulate ticks, navigate every 2nd tick
                         menu_rotate_accum += dir;
@@ -650,20 +653,16 @@ async fn main(spawner: Spawner) {
                             menu_rotate_accum = 0;
                             pending_action = match current_screen {
                                 ScreenId::MainMenu => {
-                                    main_menu_screen
-                                        .on_encoder_rotate(menu_dir, &mut app_state)
+                                    main_menu_screen.on_encoder_rotate(menu_dir, &mut app_state)
                                 }
                                 ScreenId::SourceSelect => {
-                                    source_select_screen
-                                        .on_encoder_rotate(menu_dir, &mut app_state)
+                                    source_select_screen.on_encoder_rotate(menu_dir, &mut app_state)
                                 }
                                 ScreenId::Equalizer => {
-                                    equalizer_screen
-                                        .on_encoder_rotate(menu_dir, &mut app_state)
+                                    equalizer_screen.on_encoder_rotate(menu_dir, &mut app_state)
                                 }
                                 ScreenId::Settings => {
-                                    settings_screen
-                                        .on_encoder_rotate(menu_dir, &mut app_state)
+                                    settings_screen.on_encoder_rotate(menu_dir, &mut app_state)
                                 }
                                 _ => None,
                             };
@@ -673,26 +672,18 @@ async fn main(spawner: Spawner) {
                 AppStateUpdate::EncoderPress => {
                     pending_action = match current_screen {
                         ScreenId::Home => home_screen.on_encoder_press(&mut app_state),
-                        ScreenId::MainMenu => {
-                            main_menu_screen.on_encoder_press(&mut app_state)
-                        }
+                        ScreenId::MainMenu => main_menu_screen.on_encoder_press(&mut app_state),
                         ScreenId::SourceSelect => {
                             source_select_screen.on_encoder_press(&mut app_state)
                         }
-                        ScreenId::Equalizer => {
-                            equalizer_screen.on_encoder_press(&mut app_state)
-                        }
-                        ScreenId::Settings => {
-                            settings_screen.on_encoder_press(&mut app_state)
-                        }
+                        ScreenId::Equalizer => equalizer_screen.on_encoder_press(&mut app_state),
+                        ScreenId::Settings => settings_screen.on_encoder_press(&mut app_state),
                         _ => None,
                     };
                 }
                 AppStateUpdate::EncoderLongPress => {
                     pending_action = match current_screen {
-                        ScreenId::Home => {
-                            home_screen.on_encoder_long_press(&mut app_state)
-                        }
+                        ScreenId::Home => home_screen.on_encoder_long_press(&mut app_state),
                         ScreenId::MainMenu => {
                             main_menu_screen.on_encoder_long_press(&mut app_state)
                         }
@@ -702,9 +693,7 @@ async fn main(spawner: Spawner) {
                         ScreenId::Equalizer => {
                             equalizer_screen.on_encoder_long_press(&mut app_state)
                         }
-                        ScreenId::Settings => {
-                            settings_screen.on_encoder_long_press(&mut app_state)
-                        }
+                        ScreenId::Settings => settings_screen.on_encoder_long_press(&mut app_state),
                         _ => None,
                     };
                 }
@@ -751,6 +740,17 @@ async fn main(spawner: Spawner) {
                     save_deadline = Instant::now() + Duration::from_secs(2);
                 }
                 ScreenAction::ChangeSource(_source) => {
+                    let source_u8 = match _source {
+                        AudioSource::LineIn => SOURCE_LINEIN,
+                        AudioSource::Spdif => SOURCE_SPDIF,
+                        AudioSource::Usb => SOURCE_USB,
+                        AudioSource::None => SOURCE_AUTO,
+                        AudioSource::Auto => SOURCE_AUTO,
+                    };
+                    SOURCE_MODE.store(source_u8, Ordering::Relaxed);
+                    if _source != AudioSource::Auto && _source != AudioSource::None {
+                        set_active_source(&mut app_state, source_u8);
+                    }
                     display_dirty = true;
                 }
                 ScreenAction::Refresh => {
@@ -1172,7 +1172,7 @@ async fn spdif_task(
                         };
 
                         // Write to shared ring buffer if S/PDIF is the active source
-                        if ACTIVE_SOURCE.load(Ordering::Relaxed) == SOURCE_SPDIF {
+                        if get_active_source() == SOURCE_SPDIF {
                             let input = unsafe { &mut AUDIO_INPUT };
                             for i in 0..output_count {
                                 input.write_sample(output_buffer[i]);
@@ -1285,7 +1285,7 @@ async fn usb_task(usb: embassy_rp::Peri<'static, USB>) {
         loop {
             match stream.read_packet(&mut buf).await {
                 Ok(n) => {
-                    if n > 0 && ACTIVE_SOURCE.load(Ordering::Relaxed) == SOURCE_USB {
+                    if n > 0 && get_active_source() == SOURCE_USB {
                         // Convert USB audio (24-bit packed stereo) to ring buffer
                         let samples = n / 6;
                         let input = unsafe { &mut AUDIO_INPUT };
@@ -1429,7 +1429,7 @@ fn core1_audio_main() -> ! {
         }
 
         // Always drain I2S RX FIFO to prevent overflow/stall
-        let active_source = ACTIVE_SOURCE.load(Ordering::Relaxed);
+        let active_source = get_active_source();
 
         if let Some((left, right)) = i2s_rx.try_read() {
             if active_source == SOURCE_LINEIN {

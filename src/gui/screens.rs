@@ -66,7 +66,7 @@ impl Default for AppState {
         Self {
             volume: 50,
             muted: false,
-            source: AudioSource::None,
+            source: AudioSource::Auto,
             source_locked: false,
             signal_status: SignalStatus::NoSignal,
             sample_rate: crate::hw::pins::audio::SAMPLE_RATE,
@@ -330,7 +330,7 @@ impl SourceSelectScreen {
         match self.menu.selected_action() {
             MenuAction::SelectSource(source) => {
                 state.source = source;
-                state.source_locked = source != AudioSource::None;
+                state.source_locked = source != AudioSource::Auto;
                 Some(ScreenAction::ChangeSource(source))
             }
             MenuAction::Back => Some(ScreenAction::GoTo(ScreenId::MainMenu)),
