@@ -1290,6 +1290,7 @@ dependencies = [
  "panic-probe",
  "pio",
  "portable-atomic",
+ "rp-pac",
  "static_cell",
 ]
 

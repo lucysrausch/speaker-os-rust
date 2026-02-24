@@ -21,18 +21,20 @@ mod usb_msc;
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use embassy_executor::Spawner;
-use embassy_rp::bind_interrupts;
 use embassy_rp::block::ImageDef;
 use embassy_rp::flash::{Blocking, Flash};
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::i2c::{self, I2c};
+use embassy_rp::interrupt::InterruptExt;
 use embassy_rp::multicore::{spawn_core1, Stack};
 use embassy_rp::peripherals::USB;
 use embassy_rp::pio::Pio;
 use embassy_rp::usb::Driver as UsbDriver;
+use embassy_rp::{bind_interrupts, interrupt};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Instant, Timer};
+use rp_pac;
 use static_cell::StaticCell;
 
 use crate::audio::{AudioRingBuffer, ClockSpeed, I2sRx, I2sTx, StereoFrame};
@@ -845,12 +847,14 @@ async fn main(spawner: Spawner) {
 
         // Volume-only partial redraw (only the volume number region, ~2 pages)
         if volume_dirty && !display_dirty && current_screen == ScreenId::Home {
+            defmt::debug!("[DISPLAY] Volume redraw");
             volume_dirty = false;
             let _ = home_screen.draw_clip_region(&mut display, &app_state);
         }
 
         // Full redraw for UI text/state changes (source, sample rate, etc.)
         if display_dirty {
+            defmt::debug!("[DISPLAY] Full redraw");
             display_dirty = false;
             volume_dirty = false;
             match current_screen {
@@ -1378,6 +1382,8 @@ async fn usb_task(usb: embassy_rp::Peri<'static, USB>) {
 /// I2S RX must be drained on Core 1 (not async Core 0) because the PIO RX FIFO
 /// is only 8 words deep (~4 stereo frames at 96kHz = ~42µs). Async task scheduling
 /// on Core 0 cannot guarantee the timing needed to prevent FIFO overflow.
+#[link_section = ".data"]
+#[inline(never)]
 fn core1_audio_main() -> ! {
     // Wait for Core 0 to signal that I2S is ready
     while !I2S_READY.load(Ordering::Acquire) {
@@ -1399,8 +1405,35 @@ fn core1_audio_main() -> ! {
     let mut check_counter: u32 = 0;
     const CHECK_INTERVAL: u32 = 256; // Check every 256 samples (~2.7ms at 96kHz)
 
+    // NOTE!!! Since we are disabling this interrupt which removes the pausing
+    // functionality for core1, it is essential that we do not write to flash
+    // or execute code stored on flash in this loop.
+    // See: https://github.com/embassy-rs/embassy/blob/3ab9648097a00e62f0ce7f2ece8861c638d62bf1/embassy-rp/src/flash.rs#L632
+    interrupt::SIO_IRQ_FIFO.disable();
     // Tight audio loop - runs forever on Core 1
     loop {
+        // HACK(fpoms): Responds to the fifo pause / resume token protocol since we disabled the FIFO interrupt
+        // that handled this. Note that this means we don't pause core1 when requested, but this
+        // is ok as long as we only execute code from RAM and don't write to flash.
+        const PAUSE_TOKEN: u32 = 0xDEADBEEF;
+        const RESUME_TOKEN: u32 = !0xDEADBEEF;
+        let sio = rp_pac::SIO;
+        while sio.fifo().st().read().vld() {
+            let token = sio.fifo().rd().read();
+            if token == PAUSE_TOKEN {
+                sio.fifo().wr().write_value(PAUSE_TOKEN);
+                // Fire off an event to the other core.
+                // This is required as the other core may be `wfe` (waiting for event)
+                cortex_m::asm::sev();
+            }
+            if token == RESUME_TOKEN {
+                sio.fifo().wr().write_value(RESUME_TOKEN);
+                // Fire off an event to the other core.
+                // This is required as the other core may be `wfe` (waiting for event)
+                cortex_m::asm::sev();
+            }
+        }
+
         // Check for rate change request from Core 0
         let pending = PENDING_I2S_RATE.load(Ordering::Acquire);
         if pending != 0 {
@@ -1469,7 +1502,6 @@ fn core1_audio_main() -> ! {
 
         // SAFETY: Core 1 is the only consumer of the input buffer
         let input = unsafe { &mut AUDIO_INPUT };
-
         if let Some(frame) = input.read_sample() {
             // Track peak levels for metering (absolute value, pre-EQ)
             let abs_l = (frame.left as i64).unsigned_abs() as u32;
@@ -1483,6 +1515,9 @@ fn core1_audio_main() -> ! {
         } else {
             // No audio data - output silence
             // This keeps the I2S clock running continuously
+            if (active_source == SOURCE_LINEIN) {
+                defmt::debug!("No i2s data during LINE-IN source!! Timing failure.");
+            }
             i2s_tx.write(0, 0);
         }
     }
