@@ -26,6 +26,8 @@ pub struct Sh1106<I2C> {
     buffer: [u8; BUF_SIZE],
     /// Bitmask of pages that need flushing (bit 0 = page 0, etc.)
     dirty: u8,
+    ///
+    enabled: bool,
 }
 
 impl<I2C: I2c> Sh1106<I2C> {
@@ -36,6 +38,7 @@ impl<I2C: I2c> Sh1106<I2C> {
             addr,
             buffer: [0; BUF_SIZE],
             dirty: 0xFF, // All pages dirty initially
+            enabled: false,
         }
     }
 
@@ -66,6 +69,24 @@ impl<I2C: I2c> Sh1106<I2C> {
         self.cmd(&[0xA4]).await?; // Display follows RAM content
         self.cmd(&[0xA6]).await?; // Normal display (not inverted)
         self.cmd(&[0xAF]).await?; // Display ON
+        self.enabled = true;
+        Ok(())
+    }
+
+    /// Initialize the SH1106 display controller (128x64, rotated 180°)
+    pub async fn disable_display(&mut self) -> Result<(), I2C::Error> {
+        if self.enabled {
+            self.enabled = false;
+            self.cmd(&[0xAE]).await?; // Display OFF
+        }
+        Ok(())
+    }
+
+    pub async fn enable_display(&mut self) -> Result<(), I2C::Error> {
+        if !self.enabled {
+            self.enabled = true;
+            self.cmd(&[0xAF]).await?; // Display ON
+        }
         Ok(())
     }
 

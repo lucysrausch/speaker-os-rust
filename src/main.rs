@@ -187,6 +187,9 @@ fn log_meter(raw: u32) -> u8 {
     ((log_val - LOG2_FLOOR) / RANGE_BITS * 100.0).clamp(0.0, 100.0) as u8
 }
 
+// Time in seconds before the display sleeps after not receiving an encoder input
+static DISPLAY_SLEEP_DELAY_SEC: u64 = 10;
+
 /// S/PDIF FIFO buffer (static allocation)
 static SPDIF_FIFO: StaticCell<[u32; SPDIF_RX_FIFO_SIZE]> = StaticCell::new();
 
@@ -543,6 +546,7 @@ async fn main(spawner: Spawner) {
     let mut prev_clip_flash = false;
     let mut save_pending = false;
     let mut save_deadline = Instant::now();
+    let mut last_encoder_action = Instant::now();
     let mut menu_rotate_accum: i8 = 0; // Accumulator to reduce menu rotation sensitivity
 
     // If USB is already connected at boot, start with USB
@@ -707,6 +711,7 @@ async fn main(spawner: Spawner) {
 
         // --- Handle screen actions from encoder events ---
         if let Some(action) = pending_action {
+            last_encoder_action = Instant::now();
             match action {
                 ScreenAction::GoTo(screen) => {
                     current_screen = screen;
@@ -845,42 +850,52 @@ async fn main(spawner: Spawner) {
             }
         }
 
-        // Volume-only partial redraw (only the volume number region, ~2 pages)
-        if volume_dirty && !display_dirty && current_screen == ScreenId::Home {
-            defmt::debug!("[DISPLAY] Volume redraw");
-            volume_dirty = false;
-            let _ = home_screen.draw_clip_region(&mut display, &app_state);
-        }
-
-        // Full redraw for UI text/state changes (source, sample rate, etc.)
-        if display_dirty {
-            defmt::debug!("[DISPLAY] Full redraw");
-            display_dirty = false;
-            volume_dirty = false;
-            match current_screen {
-                ScreenId::Home => {
-                    let _ = home_screen.draw(&mut display, &app_state);
-                }
-                ScreenId::MainMenu => {
-                    let _ = main_menu_screen.draw(&mut display, &app_state);
-                }
-                ScreenId::SourceSelect => {
-                    let _ = source_select_screen.draw(&mut display, &app_state);
-                }
-                ScreenId::Equalizer => {
-                    let _ = equalizer_screen.draw(&mut display, &app_state);
-                }
-                ScreenId::Settings => {
-                    let _ = settings_screen.draw(&mut display, &app_state);
-                }
-                _ => {}
+        let time_since_last_action = (Instant::now() - last_encoder_action).as_secs();
+        if time_since_last_action > DISPLAY_SLEEP_DELAY_SEC {
+            if let Err(e) = display.disable_display().await {
+                defmt::error!("Failed to disable display: {:?}", defmt::Debug2Format(&e));
             }
-        }
+        } else {
+            if let Err(e) = display.enable_display().await {
+                defmt::error!("Failed to enable display: {:?}", defmt::Debug2Format(&e));
+            }
+            // Volume-only partial redraw (only the volume number region, ~2 pages)
+            if volume_dirty && !display_dirty && current_screen == ScreenId::Home {
+                defmt::debug!("[DISPLAY] Volume redraw");
+                volume_dirty = false;
+                let _ = home_screen.draw_clip_region(&mut display, &app_state);
+            }
 
-        // Flush at most ONE dirty page per tick (~2.5ms I2C write).
-        // This spreads display updates over multiple ticks instead of
-        // bursting all dirty pages at once, preventing audio stutter.
-        let _ = display.flush_one_page().await;
+            // Full redraw for UI text/state changes (source, sample rate, etc.)
+            if display_dirty {
+                defmt::debug!("[DISPLAY] Full redraw");
+                display_dirty = false;
+                volume_dirty = false;
+                match current_screen {
+                    ScreenId::Home => {
+                        let _ = home_screen.draw(&mut display, &app_state);
+                    }
+                    ScreenId::MainMenu => {
+                        let _ = main_menu_screen.draw(&mut display, &app_state);
+                    }
+                    ScreenId::SourceSelect => {
+                        let _ = source_select_screen.draw(&mut display, &app_state);
+                    }
+                    ScreenId::Equalizer => {
+                        let _ = equalizer_screen.draw(&mut display, &app_state);
+                    }
+                    ScreenId::Settings => {
+                        let _ = settings_screen.draw(&mut display, &app_state);
+                    }
+                    _ => {}
+                }
+            }
+
+            // Flush at most ONE dirty page per tick (~2.5ms I2C write).
+            // This spreads display updates over multiple ticks instead of
+            // bursting all dirty pages at once, preventing audio stutter.
+            let _ = display.flush_one_page().await;
+        }
 
         // Debounced settings save: write to flash 2s after last volume/mute change
         if save_pending && Instant::now() >= save_deadline {
